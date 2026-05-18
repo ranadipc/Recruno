@@ -365,7 +365,7 @@ export default function Home() {
         {(notice || busy || state.status.errors.length > 0) && (
           <div className="toast">
             {!busy && <button className="toast-close" onClick={clearToast} aria-label="Dismiss notification">Dismiss</button>}
-            {busy && <ProgressBanner label={busy} step={activeStep} candidates={profileCandidates.length} apifyDone={apifySuccessCount + apifyPartialCount} scored={scoredCount} messages={state.status.messages} />}
+            {busy && <ProgressBanner label={busy} step={activeStep} candidates={profileCandidates.length} apifyDone={apifySuccessCount + apifyPartialCount} scored={scoredCount} selectedQueries={selectedQueries.length} pagesPerQuery={runSettings.pagesPerQuery} />}
             {notice && <p>{notice}</p>}
             {state.status.errors.map((error) => <p className="error" key={error}>{error}</p>)}
           </div>
@@ -680,15 +680,16 @@ function ResultReviewTabs({ results }: { results: AppState["serpResults"] }) {
   );
 }
 
-function ProgressBanner({ label, step, candidates, apifyDone, scored, messages }: { label: string; step: number; candidates: number; apifyDone: number; scored: number; messages: string[] }) {
-  const target = step === 6 ? candidates : step === 7 ? candidates : undefined;
-  const done = step === 6 ? apifyDone : step === 7 ? scored : undefined;
+function ProgressBanner({ label, step, candidates, apifyDone, scored, selectedQueries, pagesPerQuery }: { label: string; step: number; candidates: number; apifyDone: number; scored: number; selectedQueries: number; pagesPerQuery: number }) {
+  const target = step === 6 ? candidates : step === 8 ? candidates : undefined;
+  const done = step === 6 ? apifyDone : step === 8 ? scored : undefined;
   const percent = target ? Math.min(100, Math.round(((done ?? 0) / Math.max(1, target)) * 100)) : undefined;
-  const detail = step === 6
-    ? `${apifyDone} of ${candidates} profiles have Apify data saved`
-    : step === 7
-      ? `${scored} of ${candidates} profiles scored`
-      : messages[0] ?? "Working on the current step";
+  const detail =
+    step === 4 ? `Searching ${selectedQueries} selected quer${selectedQueries === 1 ? "y" : "ies"} across ${pagesPerQuery} page${pagesPerQuery === 1 ? "" : "s"}.` :
+    step === 6 ? `${apifyDone} of ${candidates} profiles have Apify data saved.` :
+    step === 7 ? "Applying filters to parsed profile data." :
+    step === 8 ? `${scored} of ${candidates} profiles scored.` :
+    "Working on this step. Results will appear here when it finishes.";
   return (
     <div className="progress-banner">
       <div className="spinner" />
