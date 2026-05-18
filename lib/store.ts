@@ -15,7 +15,9 @@ async function ensureDataDir() {
 async function readJson<T>(file: string, fallback: T): Promise<T> {
   try {
     const raw = await readFile(file, "utf8");
-    return { ...fallback, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(fallback)) return (Array.isArray(parsed) ? parsed : fallback) as T;
+    return { ...fallback, ...parsed };
   } catch {
     return fallback;
   }
@@ -150,7 +152,18 @@ export async function loadWorkflowSnapshot(id: string): Promise<AppState> {
   const workflows = await listWorkflows();
   const workflow = workflows.find((item) => item.id === id);
   if (!workflow) throw new Error("Saved workflow not found.");
-  return saveState(workflow.state);
+  const normalized: AppState = {
+    ...DEFAULT_STATE,
+    ...workflow.state,
+    rejectedSerpResults: workflow.state.rejectedSerpResults ?? [],
+    intentEvidenceSources: workflow.state.intentEvidenceSources ?? [],
+    profileFilters: { ...DEFAULT_STATE.profileFilters, ...(workflow.state.profileFilters ?? {}) },
+    promptOverrides: { ...DEFAULT_STATE.promptOverrides, ...(workflow.state.promptOverrides ?? {}) },
+    oneClick: { ...DEFAULT_STATE.oneClick, ...(workflow.state.oneClick ?? {}) },
+    status: { ...DEFAULT_STATE.status, ...workflow.state.status },
+    apolloTierSelection: { ...DEFAULT_STATE.apolloTierSelection, ...workflow.state.apolloTierSelection }
+  };
+  return saveState(normalized);
 }
 
 export async function deleteWorkflowSnapshot(id: string): Promise<SavedWorkflow[]> {

@@ -111,6 +111,10 @@ function Field({ label, value, onChange, placeholder, textarea = false, type = "
   );
 }
 
+function parseUiTerms(value: string) {
+  return value.split(/[,;\n]/).map((item) => item.trim()).filter(Boolean);
+}
+
 type PromptKind = "queryGeneration" | "profileFilters" | "scoring";
 
 function workflowWeight(value: AppState) {
@@ -672,10 +676,10 @@ export default function Home() {
             <div className="cost-panel">
               <div>
                 <strong>Cost saver is on</strong>
-                <p>Default scoring uses scraped profiles first, sorted by visibility, capped at {scoreSettings.maxCandidates}. Raise the cap only when you need more coverage.</p>
+                <p>Default scoring prefers scraped profiles first, sorted by visibility, capped at {scoreSettings.maxCandidates}. If filters are too strict, scoring still runs on available profiles instead of blocking.</p>
               </div>
               <label><span>Max candidates</span><input type="number" min={1} value={scoreSettings.maxCandidates} onChange={(event) => setScoreSettings({ ...scoreSettings, maxCandidates: Number(event.target.value) })} /></label>
-              <label className="switch-row"><input type="checkbox" checked={scoreSettings.onlyScraped} onChange={(event) => setScoreSettings({ ...scoreSettings, onlyScraped: event.target.checked })} /> scored scraped/partial only</label>
+              <label className="switch-row"><input type="checkbox" checked={scoreSettings.onlyScraped} onChange={(event) => setScoreSettings({ ...scoreSettings, onlyScraped: event.target.checked })} /> prefer scraped/partial profiles</label>
             </div>
             <div className="actions"><SmallButton onClick={() => openPromptEditor("scoring")}>Edit Prompt</SmallButton><SmallButton variant="primary" onClick={() => runAction("Fit scoring", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Run Fit Score</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
             <div className="summary-cards"><Metric label="Profiles" value={profileCandidates.length} /><Metric label="Scored" value={scoredCount} /><Metric label="Scraped/partial" value={apifySuccessCount + apifyPartialCount} /><Metric label="Default cap" value={scoreSettings.maxCandidates} /></div>
@@ -841,7 +845,15 @@ function WorkflowProgress({ activeStep }: { activeStep: number }) {
 }
 
 function FilterField({ label, value, onChange }: { label: string; value: string[]; onChange: (value: string[]) => void }) {
-  return <label><span>{label}</span><input value={value.join(", ")} onChange={(event) => onChange(event.target.value.split(",").map((item) => item.trim()).filter(Boolean))} /></label>;
+  const [draft, setDraft] = useState(value.join(", "));
+  useEffect(() => {
+    setDraft(value.join(", "));
+  }, [value.join("\u0001")]);
+  const commit = (next: string) => {
+    setDraft(next);
+    onChange(parseUiTerms(next));
+  };
+  return <label><span>{label}</span><input value={draft} onChange={(event) => commit(event.target.value)} placeholder="Use commas: Bain, McKinsey, BCG" /></label>;
 }
 
 function ResultReviewTabs({ results }: { results: AppState["serpResults"] }) {

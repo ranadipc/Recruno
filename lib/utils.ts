@@ -340,7 +340,9 @@ export function applyProfileFilters(candidate: Candidate, filters: ProfileFilter
   const reasons: string[] = [];
   const requireAny = (label: string, values: string[], haystack: string) => {
     const terms = values.map((value) => value.toLowerCase()).filter(Boolean);
-    if (terms.length && !terms.some((term) => haystack.includes(term))) reasons.push(`${label} missing: ${values.join(", ")}`);
+    const searchable = haystack.toLowerCase();
+    if (label === "Actual location" && actual.status === "india" && terms.some((term) => term === "india")) return;
+    if (terms.length && !terms.some((term) => searchable.includes(term))) reasons.push(`${label} missing: ${values.join(", ")}`);
   };
   requireAny("Actual location", filters.actual_location_must_include, actual.evidence || profile?.location || "");
   requireAny("Current title", filters.current_title_must_include, profile?.current_title || candidate.title_guess || "");

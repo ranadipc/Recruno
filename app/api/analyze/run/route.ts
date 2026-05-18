@@ -12,14 +12,14 @@ export async function POST(request: Request) {
     const state = await getState();
     if (!state.brief) return NextResponse.json({ error: "Missing brief." }, { status: 400 });
     const ids = new Set<string>(body.candidateIds ?? []);
-    const eligible = state.candidates
+    const baseCandidates = state.candidates
       .filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"))
       .filter((candidate) => !ids.size || ids.has(candidate.id))
-      .filter((candidate) => !onlyScraped || candidate.apify_status === "apify_success" || candidate.apify_status === "apify_partial")
-      .filter((candidate) => candidate.passes_profile_filter !== false || candidate.include_failed_profile_filter)
-      .sort((a, b) => b.visibility_factor - a.visibility_factor)
-      .slice(0, maxCandidates);
-    if (eligible.length === 0) return NextResponse.json({ error: "No candidates matched the scoring settings." }, { status: 400 });
+      .filter((candidate) => candidate.manual_status !== "rejected");
+    const scrapedCandidates = baseCandidates.filter((candidate) => candidate.apify_status === "apify_success" || candidate.apify_status === "apify_partial");
+    const preferred = onlyScraped && scrapedCandidates.length > 0 ? scrapedCandidates : baseCandidates;
+    const eligible = preferred.sort((a, b) => b.visibility_factor - a.visibility_factor).slice(0, maxCandidates);
+    if (eligible.length === 0) return NextResponse.json({ error: "No LinkedIn profile candidates found to score. Run Clean Data first." }, { status: 400 });
 
     const analyzed = new Map<string, Awaited<ReturnType<typeof analyzeCandidate>>>();
     const concurrency = Math.min(5, eligible.length);

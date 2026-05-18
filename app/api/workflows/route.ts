@@ -6,16 +6,20 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const body = await request.json().catch(() => ({}));
-  const action = String(body.action ?? "save");
-  if (action === "save") {
-    return NextResponse.json({ workflows: await saveWorkflowSnapshot(String(body.name ?? "")) });
+  try {
+    const body = await request.json().catch(() => ({}));
+    const action = String(body.action ?? "save");
+    if (action === "save") {
+      return NextResponse.json({ workflows: await saveWorkflowSnapshot(String(body.name ?? "")) });
+    }
+    if (action === "load") {
+      return NextResponse.json({ state: await loadWorkflowSnapshot(String(body.id ?? "")), workflows: await listWorkflows() });
+    }
+    if (action === "delete") {
+      return NextResponse.json({ workflows: await deleteWorkflowSnapshot(String(body.id ?? "")) });
+    }
+    return NextResponse.json({ error: "Unknown workflow action." }, { status: 400 });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Workflow action failed." }, { status: 400 });
   }
-  if (action === "load") {
-    return NextResponse.json({ state: await loadWorkflowSnapshot(String(body.id ?? "")), workflows: await listWorkflows() });
-  }
-  if (action === "delete") {
-    return NextResponse.json({ workflows: await deleteWorkflowSnapshot(String(body.id ?? "")) });
-  }
-  return NextResponse.json({ error: "Unknown workflow action." }, { status: 400 });
 }
