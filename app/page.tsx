@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { ApolloTierSelection, AppState, Candidate, ProfileFilters, PublicSettings, Query, QueryType, Tier, WorkflowSettings } from "@/lib/types";
+import type { ApolloTierSelection, AppState, Candidate, ProfileFilters, PublicSettings, Query, QueryType, SavedWorkflow, Tier, WorkflowSettings } from "@/lib/types";
 import { DEFAULT_APOLLO_TIERS, DEFAULT_WORKFLOW } from "@/lib/defaults";
 
 const steps = [
@@ -30,6 +30,7 @@ function emptyState(): AppState {
     candidates: [],
     rawSerpRuns: [],
     intentEvidenceSources: [],
+    promptOverrides: {},
     profileFilters: {
       actual_location_must_include: ["India", "Bangalore", "Bengaluru", "Mumbai"],
       current_title_must_include: [],
@@ -110,6 +111,24 @@ function Field({ label, value, onChange, placeholder, textarea = false, type = "
   );
 }
 
+function defaultPromptOverride(kind: "queryGeneration" | "scoring") {
+  if (kind === "queryGeneration") {
+    return [
+      "Generate practical recruiter X-ray queries.",
+      "Prioritize high-signal title, current company, past company, location, keywords, education, and intent combinations.",
+      "Do not use experience proxy years in search queries.",
+      "Keep India-focused query helpers when India/Bangalore/Mumbai/etc. is requested."
+    ].join("\n");
+  }
+  return [
+    "Rank candidates by surety of good match.",
+    "Use visibility_factor as a confidence signal when the repeated matches are relevant.",
+    "Prefer Apify-backed profile evidence over SerpAPI snippets.",
+    "A high score should require strong fit plus clear evidence for title, company, actual location, keywords, and seniority.",
+    "If evidence is weak or location/company/title is uncertain, lower confidence and add manual checks."
+  ].join("\n");
+}
+
 export default function Home() {
   const [state, setState] = useState<AppState>(emptyState());
   const [settings, setSettings] = useState<PublicSettings>({
@@ -121,6 +140,10 @@ export default function Home() {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [evidenceCandidate, setEvidenceCandidate] = useState<Candidate | null>(null);
+  const [promptEditor, setPromptEditor] = useState<"queryGeneration" | "scoring" | null>(null);
+  const [promptDraft, setPromptDraft] = useState("");
+  const [savedWorkflows, setSavedWorkflows] = useState<SavedWorkflow[]>([]);
+  const [workflowName, setWorkflowName] = useState("PM workflow");
   const [oneClickText, setOneClickText] = useState("");
   const [oneClickSettings, setOneClickSettings] = useState({ pagesPerQuery: 2, maxSearches: 20, maxCandidates: 50, location: "India" });
   const [briefForm, setBriefForm] = useState({
@@ -162,9 +185,10 @@ export default function Home() {
   const [finalFilter, setFinalFilter] = useState({ tier: "all", contact: "all", search: "" });
 
   async function refresh(keepStep = false) {
-    const [nextState, nextSettings] = await Promise.all([api<AppState>("/api/state"), api<PublicSettings>("/api/settings")]);
+    const [nextState, nextSettings, workflows] = await Promise.all([api<AppState>("/api/state"), api<PublicSettings>("/api/settings"), api<SavedWorkflow[]>("/api/workflows")]);
     setState(nextState);
     setSettings(nextSettings);
+    setSavedWorkflows(workflows);
     setWorkflow(nextSettings.workflow);
     setSecretForm((form) => ({ ...form, APIFY_ACTOR_ID: nextSettings.apifyActorId }));
     setTierSelection(nextState.apolloTierSelection);
@@ -201,6 +225,8 @@ export default function Home() {
   }
 
   async function runAction<T>(label: string, action: () => Promise<T>, after?: (value: T) => void) {
+    if (busy) return;
+    if (process.env.NODE_ENV === "development") console.log(`[Recruno] ${label} started`);
     setBusy(label);
     setNotice("");
     try {
@@ -209,8 +235,10 @@ export default function Home() {
       if (!after && result && typeof result === "object" && "status" in result) setState(result as unknown as AppState);
       await refresh(true);
       setNotice(`${label} completed`);
+      if (process.env.NODE_ENV === "development") console.log(`[Recruno] ${label} completed`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : `${label} failed`);
+      if (process.env.NODE_ENV === "development") console.error(`[Recruno] ${label} failed`, error);
     } finally {
       setBusy("");
     }
@@ -227,6 +255,19 @@ export default function Home() {
   const foundPhones = profileCandidates.filter((candidate) => candidate.phone).length;
   const isOneClick = activeStep === 12;
   const oneClickCandidates = state.oneClick.candidates.filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"));
+
+  function openPromptEditor(kind: "queryGeneration" | "scoring") {
+    setPromptEditor(kind);
+    setPromptDraft(state.promptOverrides[kind] || defaultPromptOverride(kind));
+  }
+
+  async function savePromptOverride() {
+    if (!promptEditor) return;
+    const next = await api<AppState>("/api/prompts", { method: "POST", body: JSON.stringify({ [promptEditor]: promptDraft }) });
+    setState(next);
+    setPromptEditor(null);
+    setNotice("Prompt saved");
+  }
 
   const selectedForApollo = useMemo(() => {
     return profileCandidates.filter((candidate) => {
@@ -289,6 +330,30 @@ export default function Home() {
     setState(next);
   }
 
+  async function saveBriefAndContinue() {
+    await runAction("Save brief", () => api<AppState>("/api/brief", { method: "POST", body: JSON.stringify(briefForm) }), (next) => {
+      setState(next);
+      setActiveStep(3);
+    });
+  }
+
+  async function saveWorkflow() {
+    const response = await api<{ workflows: SavedWorkflow[] }>("/api/workflows", { method: "POST", body: JSON.stringify({ action: "save", name: workflowName }) });
+    setSavedWorkflows(response.workflows);
+  }
+
+  async function loadWorkflow(id: string) {
+    const response = await api<{ state: AppState; workflows: SavedWorkflow[] }>("/api/workflows", { method: "POST", body: JSON.stringify({ action: "load", id }) });
+    setState(response.state);
+    setSavedWorkflows(response.workflows);
+    setActiveStep(Math.min(response.state.status.currentStep || 1, steps.length));
+  }
+
+  async function deleteWorkflow(id: string) {
+    const response = await api<{ workflows: SavedWorkflow[] }>("/api/workflows", { method: "POST", body: JSON.stringify({ action: "delete", id }) });
+    setSavedWorkflows(response.workflows);
+  }
+
   async function handleImport(file: File) {
     const form = new FormData();
     form.append("file", file);
@@ -323,14 +388,14 @@ export default function Home() {
           {steps.map((step, index) => {
             const number = index + 1;
             return (
-              <button key={step} className={activeStep === number ? "active" : ""} onClick={() => setActiveStep(number)}>
+              <button key={step} className={activeStep === number ? "active" : ""} onClick={() => !busy && setActiveStep(number)} disabled={Boolean(busy)}>
                 <span>{number}</span>
                 {step}
               </button>
             );
           })}
           <div className="sidebar-divider" />
-          <button className={isOneClick ? "active one-click-nav" : "one-click-nav"} onClick={() => setActiveStep(12)}>
+          <button className={isOneClick ? "active one-click-nav" : "one-click-nav"} onClick={() => !busy && setActiveStep(12)} disabled={Boolean(busy)}>
             <span>1</span>
             One Click
           </button>
@@ -345,17 +410,11 @@ export default function Home() {
           </div>
           <div className="top-actions">
             <span className="mode real">Live API mode</span>
-            <SmallButton onClick={() => refresh(true)}>Refresh</SmallButton>
-            <SmallButton onClick={() => runAction("Reload state from disk", () => api<AppState>("/api/state"))}>Reload state</SmallButton>
-            <SmallButton onClick={() => runAction("Reset running flags", () => api<AppState>("/api/state", { method: "POST", body: JSON.stringify({ resetRunningFlags: true }) }))}>Reset running</SmallButton>
-            <SmallButton variant="danger" onClick={resetData}>Reset data</SmallButton>
           </div>
         </header>
 
         {!isOneClick ? (
-          <div className="top-stepper">
-            {steps.map((step, index) => <button key={step} className={activeStep === index + 1 ? "active" : activeStep > index + 1 ? "done" : ""} onClick={() => setActiveStep(index + 1)}>{step}</button>)}
-          </div>
+          <WorkflowProgress activeStep={activeStep} />
         ) : (
           <div className="top-stepper one-click-steps">
             {["Upload JD", "Generate searches", "Find profiles", "Scrape profiles", "Score fit + intent", "Download shortlist"].map((step, index) => <button key={step} className={state.oneClick.status === "completed" || index === 0 ? "done" : ""}>{step}</button>)}
@@ -408,6 +467,38 @@ export default function Home() {
               <SmallButton variant="primary" onClick={() => runAction("Save settings", () => api<PublicSettings>("/api/settings", { method: "POST", body: JSON.stringify({ ...secretForm, workflow }) }), (value) => { setSettings(value); setSecretForm({ OPENAI_API_KEY: "", SERPAPI_API_KEY: "", APIFY_API_TOKEN: "", APIFY_ACTOR_ID: value.apifyActorId, APOLLO_API_KEY: "" }); })}>Save Settings</SmallButton>
               {["openai", "serpapi", "apify", "apollo"].map((provider) => <SmallButton key={provider} onClick={() => runAction(`Test ${provider}`, () => api<{ ok: boolean; message: string }>("/api/settings/test", { method: "POST", body: JSON.stringify({ provider }) }), (value) => setNotice(value.message))}>Test {provider}</SmallButton>)}
             </div>
+            <details className="details-card">
+              <summary>Saved workflows</summary>
+              <div className="workflow-save-row">
+                <input value={workflowName} onChange={(event) => setWorkflowName(event.target.value)} placeholder="PM workflow, Solar sales workflow..." />
+                <SmallButton variant="primary" onClick={() => runAction("Save workflow", saveWorkflow)}>Save Current Workflow</SmallButton>
+              </div>
+              {savedWorkflows.length === 0 ? <div className="empty-state">No saved workflows yet. Run a project once, then save it here.</div> : (
+                <div className="saved-workflows">
+                  {savedWorkflows.map((workflow) => (
+                    <div className="saved-workflow-card" key={workflow.id}>
+                      <div>
+                        <strong>{workflow.name}</strong>
+                        <span>{workflow.summary.brief_title}</span>
+                        <em>{workflow.summary.candidates} candidates · {workflow.summary.scored} scored · updated {new Date(workflow.updated_at).toLocaleString()}</em>
+                      </div>
+                      <div className="actions">
+                        <SmallButton onClick={() => runAction(`Load ${workflow.name}`, () => loadWorkflow(workflow.id))}>Open</SmallButton>
+                        <SmallButton variant="danger" onClick={() => runAction(`Delete ${workflow.name}`, () => deleteWorkflow(workflow.id))}>Delete</SmallButton>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </details>
+            <details className="details-card">
+              <summary>Advanced debug controls</summary>
+              <div className="actions">
+                <SmallButton onClick={() => refresh(true)}>Reload State</SmallButton>
+                <SmallButton onClick={() => runAction("Reset running flags", () => api<AppState>("/api/state", { method: "POST", body: JSON.stringify({ resetRunningFlags: true }) }))}>Reset Running Flags</SmallButton>
+                <SmallButton variant="danger" onClick={resetData}>Reset All Data</SmallButton>
+              </div>
+            </details>
           </section>
         )}
 
@@ -426,7 +517,10 @@ export default function Home() {
             </div>
             <Field label="Free-text JD / client brief" textarea value={briefForm.jd_text} onChange={(value) => setBriefForm({ ...briefForm, jd_text: value })} placeholder="Paste the client brief or role notes." />
             {state.brief?.expansions && Object.keys(state.brief.expansions).length > 0 && <div className="expansions"><strong>Auto-expanded terms</strong>{Object.entries(state.brief.expansions).map(([term, values]) => <span key={term}>{term}: {values.join(" OR ")}</span>)}</div>}
-            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Save brief", () => api<AppState>("/api/brief", { method: "POST", body: JSON.stringify(briefForm) }))}>Save Brief</SmallButton><SmallButton onClick={() => setActiveStep(3)}>Next</SmallButton></div>
+            <div className="actions">
+              <SmallButton variant="primary" disabled={Boolean(busy)} onClick={saveBriefAndContinue}>Save Brief + Continue</SmallButton>
+              {state.brief && <SmallButton disabled={Boolean(busy)} onClick={() => setActiveStep(3)}>Continue Without Changes</SmallButton>}
+            </div>
           </section>
         )}
 
@@ -434,7 +528,8 @@ export default function Home() {
           <section className="panel simple">
             <div className="section-heading"><h3>Generate and choose searches</h3><p>Precision searches find obvious matches. Recall searches catch people whose profiles miss one visible keyword.</p></div>
             <div className="summary-cards"><Metric label="Brief" value={state.brief ? "Saved" : "Missing"} /><Metric label="Queries" value={state.queries.length} /><Metric label="Selected" value={selectedQueries.length} /><Metric label="Estimated searches" value={selectedQueries.length * runSettings.pagesPerQuery} /></div>
-            <div className="actions"><SmallButton variant="primary" disabled={!state.brief} onClick={() => runAction("Generate query matrix", () => api<AppState>("/api/queries/generate", { method: "POST" }))}>Generate Query Matrix</SmallButton></div>
+            {!state.brief && <div className="empty-state">No brief saved yet. Go back one step and use Save Brief + Continue.</div>}
+            <div className="actions"><SmallButton onClick={() => openPromptEditor("queryGeneration")}>Edit Prompt</SmallButton><SmallButton variant="primary" disabled={!state.brief || Boolean(busy)} onClick={() => runAction("Generate query matrix", () => api<AppState>("/api/queries/generate", { method: "POST" }))}>Generate Query Matrix</SmallButton></div>
             {state.queries.length > 0 && (
               <details className="details-card" open>
                 <summary>Review query list</summary>
@@ -519,7 +614,7 @@ export default function Home() {
               <label><span>Max candidates</span><input type="number" min={1} value={scoreSettings.maxCandidates} onChange={(event) => setScoreSettings({ ...scoreSettings, maxCandidates: Number(event.target.value) })} /></label>
               <label className="switch-row"><input type="checkbox" checked={scoreSettings.onlyScraped} onChange={(event) => setScoreSettings({ ...scoreSettings, onlyScraped: event.target.checked })} /> scored scraped/partial only</label>
             </div>
-            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Fit + Intent", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit_intent", ...scoreSettings }) }))}>Fit + Intent</SmallButton><SmallButton onClick={() => runAction("Fit Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Fit Only</SmallButton><SmallButton onClick={() => runAction("Intent Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "intent", ...scoreSettings }) }))}>Intent Only</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
+            <div className="actions"><SmallButton onClick={() => openPromptEditor("scoring")}>Edit Prompt</SmallButton><SmallButton variant="primary" onClick={() => runAction("Fit + Intent", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit_intent", ...scoreSettings }) }))}>Fit + Intent</SmallButton><SmallButton onClick={() => runAction("Fit Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Fit Only</SmallButton><SmallButton onClick={() => runAction("Intent Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "intent", ...scoreSettings }) }))}>Intent Only</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
             <div className="summary-cards"><Metric label="Profiles" value={profileCandidates.length} /><Metric label="Scored" value={scoredCount} /><Metric label="Scraped/partial" value={apifySuccessCount + apifyPartialCount} /><Metric label="Default cap" value={scoreSettings.maxCandidates} /></div>
             <ScoredTable candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save scores", saveCandidates)} onEvidence={setEvidenceCandidate} />
           </section>
@@ -628,6 +723,7 @@ export default function Home() {
         {!isOneClick && <StepFooter activeStep={activeStep} setActiveStep={setActiveStep} maxStep={steps.length} busy={Boolean(busy)} />}
 
         {evidenceCandidate && <EvidenceDrawer candidate={evidenceCandidate} onClose={() => setEvidenceCandidate(null)} />}
+        {promptEditor && <PromptModal kind={promptEditor} value={promptDraft} onChange={setPromptDraft} onSave={() => runAction("Save prompt", savePromptOverride)} onClose={() => setPromptEditor(null)} />}
       </section>
     </main>
   );
@@ -651,6 +747,34 @@ function helperCopy(step: number) {
 
 function Metric({ label, value }: { label: string; value: React.ReactNode }) {
   return <div className="metric-card"><strong>{value}</strong><span>{label}</span></div>;
+}
+
+function WorkflowProgress({ activeStep }: { activeStep: number }) {
+  const beforeApollo = steps.slice(0, 9);
+  const bounded = Math.min(activeStep, beforeApollo.length);
+  const percent = Math.max(0, Math.min(100, ((bounded - 1) / Math.max(1, beforeApollo.length - 1)) * 100));
+  return (
+    <div className="workflow-progress" aria-label="Workflow progress before Apollo">
+      <div className="workflow-progress-head">
+        <strong>Progress to before-Apollo shortlist</strong>
+        <span>Finish: Review + Download</span>
+      </div>
+      <div className="workflow-rail">
+        <div className="workflow-fill" style={{ width: `${percent}%` }} />
+        {beforeApollo.map((step, index) => {
+          const number = index + 1;
+          const done = activeStep > number;
+          const active = activeStep === number;
+          return (
+            <div className={`workflow-dot ${done ? "done" : ""} ${active ? "active" : ""}`} style={{ left: `${(index / Math.max(1, beforeApollo.length - 1)) * 100}%` }} key={step}>
+              <span>{done ? "✓" : number}</span>
+              <em>{step}</em>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function FilterField({ label, value, onChange }: { label: string; value: string[]; onChange: (value: string[]) => void }) {
@@ -1002,4 +1126,25 @@ function JsonTree({ value }: { value: unknown }) {
 
 function EvidenceSection({ title, items }: { title: string; items: string[] }) {
   return <section className="drawer-section"><h4>{title}</h4>{items.length ? <ul>{items.map((item, index) => <li key={`${title}-${index}`}>{item}</li>)}</ul> : <p className="subtle">No data captured.</p>}</section>;
+}
+
+function PromptModal({ kind, value, onChange, onSave, onClose }: { kind: "queryGeneration" | "scoring"; value: string; onChange: (value: string) => void; onSave: () => void; onClose: () => void }) {
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <aside className="prompt-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="drawer-head">
+          <div>
+            <h3>Edit {kind === "queryGeneration" ? "Query Generation" : "Fit + Intent Scoring"} Prompt</h3>
+            <p>The app still adds the required JSON schema and candidate/JD context server-side.</p>
+          </div>
+          <SmallButton onClick={onClose}>Close</SmallButton>
+        </div>
+        <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={14} />
+        <div className="actions">
+          <SmallButton onClick={() => onChange(defaultPromptOverride(kind))}>Reset Draft</SmallButton>
+          <SmallButton variant="primary" onClick={onSave}>Save Prompt</SmallButton>
+        </div>
+      </aside>
+    </div>
+  );
 }

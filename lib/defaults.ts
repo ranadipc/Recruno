@@ -42,6 +42,7 @@ export const DEFAULT_STATE: AppState = {
     require_no_promotion_signal: false,
     exclude_terms: []
   },
+  promptOverrides: {},
   oneClick: {
     jd_text: "",
     queries: [],

@@ -7,7 +7,7 @@ export async function POST() {
     const state = await getState();
     if (!state.brief) return NextResponse.json({ error: "Save a brief first." }, { status: 400 });
     const settings = await getSettings();
-    const queries = await generateQueries(settings, state.brief);
+    const queries = await generateQueries(settings, state.brief, state.promptOverrides.queryGeneration);
     const next = await patchState({ queries, status: { currentStep: 4, errors: [] } as never }, `${queries.length} queries generated.`);
     return NextResponse.json(next);
   } catch (error) {

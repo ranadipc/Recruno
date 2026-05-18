@@ -140,10 +140,15 @@ The app stores workflow state in local JSON files under `data/`:
 
 - `data/settings.json`
 - `data/state.json`
+- `data/workflows.json`
 
 Intermediate data is preserved after each step, including raw SerpAPI page snapshots and raw Apify/Apollo payloads.
 
 Use **Reset data** in the top menu to clear local workflow state.
+
+You can also save named workflow snapshots from Settings. A saved workflow preserves the brief, queries, SerpAPI results, rejected results, candidates, Apify data, scoring, manual review, and export-ready rows so you can reopen a PM-style project later without rerunning everything.
+
+On Vercel, local file persistence is temporary. For durable saved workflows on the deployed website, use a database such as Supabase later.
 
 ## Apify Actor
 

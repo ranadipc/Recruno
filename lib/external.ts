@@ -45,7 +45,7 @@ function asTier(value: unknown, total: number): Tier {
   return tierFromScore(total);
 }
 
-export async function generateQueries(settings: Settings, brief: Brief): Promise<Query[]> {
+export async function generateQueries(settings: Settings, brief: Brief, promptOverride?: string): Promise<Query[]> {
   if (settings.workflow.mockMode) return mockQueries(brief);
   requireKey(settings.OPENAI_API_KEY, "OPENAI_API_KEY");
   const indiaHelper = brief.locations.some((location) => /india/i.test(location))
@@ -53,6 +53,7 @@ export async function generateQueries(settings: Settings, brief: Brief): Promise
     : "";
   const prompt = `
 Generate a LinkedIn X-ray query matrix for a recruiter sourcing workflow.
+${promptOverride?.trim() ? `Recruiter-editable instructions:\n${promptOverride.trim()}\n` : ""}
 Return only JSON with this shape:
 {"queries":[{"query_text":"string","query_type":"profile_location|profile_keyword|profile_education|career_path|intent_post|layoff_post|hiring_comment","expected_filters":["string"],"priority":1,"selected":true,"notes":"string"}]}
 
@@ -206,10 +207,11 @@ export async function runApify(settings: Settings, candidates: Candidate[], brie
   }));
 }
 
-export async function analyzeCandidate(settings: Settings, brief: Brief, candidate: Candidate, mode: "fit_intent" | "fit" | "intent") {
+export async function analyzeCandidate(settings: Settings, brief: Brief, candidate: Candidate, mode: "fit_intent" | "fit" | "intent", promptOverride?: string) {
   requireKey(settings.OPENAI_API_KEY, "OPENAI_API_KEY");
   const prompt = `
 Analyze this LinkedIn sourcing candidate against the brief. Return only JSON:
+${promptOverride?.trim() ? `Recruiter-editable scoring instructions:\n${promptOverride.trim()}\n` : ""}
 {
   "fit_score": 0,
   "intent_score": 0,
@@ -244,6 +246,10 @@ Scoring:
 - Do not remove or reject automatically.
 - If mode is ${mode}, keep unavailable sections conservative, not zero-punitive.
 - Tier thresholds are strict: Tier 1 total_score > 80, Tier 2 60-80, Tier 3 30-60, Tier 4 below 30.
+- Always rank/summarize candidates based on both match strength and evidence certainty.
+- Higher visibility_factor means the profile appeared across more selected queries and should increase confidence when the evidence is relevant.
+- Prefer high-confidence matches with Apify-backed title/company/location/experience evidence over snippet-only matches.
+- If two candidates have similar fit, the one with stronger evidence and higher visibility should be treated as the surer/better match.
 
 Full JD / client brief and structured filters:
 ${JSON.stringify(brief)}

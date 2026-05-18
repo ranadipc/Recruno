@@ -168,12 +168,13 @@ export function cleanLinkedInName(value: string) {
 function tidyCompany(value: string | undefined) {
   if (!value) return "";
   const clean = value
-    .replace(/\b(working|focused|former|based|open|looking|exploring|impacted|laid|restructuring|payments?|lending|upi)\b.*$/i, "")
-    .replace(/[|,.;:()[\]]+.*$/g, "")
+    .replace(/\b(view|location|education|connections?|profile|community|responsible|led|built|worked|working|focused|former|based|open|looking|exploring|impacted|laid|restructuring)\b.*$/i, "")
+    .replace(/\s+·.*$/g, "")
+    .replace(/[|;:()[\]]+.*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (!clean || clean.length > 35 || /\d{4}/.test(clean)) return "";
-  if (/^(former|ex|alum|consultant|product|manager|senior|lead|pm|apm)$/i.test(clean)) return "";
+  if (!clean || clean.length > 60 || /\d{4}/.test(clean)) return "";
+  if (/^(former|ex|alum|consultant|product|manager|senior|lead|pm|apm|experience|education|location)$/i.test(clean)) return "";
   return clean;
 }
 
@@ -195,9 +196,12 @@ export function guessFromSerp(title: string, snippet: string) {
   const name = cleanLinkedInName(parts[0] || cleanTitle);
   const detailParts = parts.slice(1);
   const detail = detailParts.join(" - ");
-  const atMatch = `${detail} ${snippet}`.match(/\b([^|.;:]{2,45}?)\s+at\s+([A-Z][A-Za-z0-9&.\s-]{1,35})/);
-  const titleGuess = tidyTitle(atMatch?.[1] ?? detailParts[0]);
-  const companyGuess = tidyCompany(atMatch?.[2] ?? detailParts[1] ?? `${title} ${snippet}`.match(/\bat\s+([A-Z][A-Za-z0-9&.\s-]{1,35})/)?.[1]);
+  const text = `${detail} ${snippet}`.replace(/\s+/g, " ");
+  const atMatch = text.match(/\b([^|.;:·]{2,55}?)\s+at\s+([^·|.;:]{2,70})/i);
+  const experienceMatch = text.match(/\bExperience\s*[:·-]\s*([^·|.;:\n]{2,70})/i);
+  const headlineCompanyMatch = text.match(/^[^·|.;:]{2,70}?\s+at\s+([^·|.;:]{2,70})/i);
+  const titleGuess = tidyTitle(atMatch?.[1] ?? detailParts[0] ?? snippet.split("·")[0]);
+  const companyGuess = tidyCompany(atMatch?.[2] ?? experienceMatch?.[1] ?? headlineCompanyMatch?.[1] ?? detailParts[1]);
   return {
     name_guess: name,
     title_guess: titleGuess,
@@ -233,6 +237,9 @@ export function cleanCandidateFromResults(results: SerpResult[]): { candidates: 
     const guess = guessFromSerp(result.title, result.snippet);
     if (existing) {
       duplicatesRemoved += 1;
+      if (!existing.name_guess && guess.name_guess) existing.name_guess = guess.name_guess;
+      if (!existing.title_guess && guess.title_guess) existing.title_guess = guess.title_guess;
+      if (!existing.company_guess && guess.company_guess) existing.company_guess = guess.company_guess;
       existing.original_urls = Array.from(new Set([...existing.original_urls, result.link]));
       existing.snippets = Array.from(new Set([...existing.snippets, result.snippet].filter(Boolean)));
       existing.matched_query_ids = Array.from(new Set([...existing.matched_query_ids, result.query_id]));

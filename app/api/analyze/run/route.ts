@@ -28,7 +28,7 @@ export async function POST(request: Request) {
       while (cursor < eligible.length) {
         const candidate = eligible[cursor];
         cursor += 1;
-        const analysis = await analyzeCandidate(settings, state.brief!, candidate, mode);
+        const analysis = await analyzeCandidate(settings, state.brief!, candidate, mode, state.promptOverrides.scoring);
         analyzed.set(candidate.id, analysis);
       }
     }));

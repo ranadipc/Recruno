@@ -1,11 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_SETTINGS, DEFAULT_STATE } from "./defaults";
-import type { AppState, PublicSettings, SecretSettings, Settings } from "./types";
+import type { AppState, PublicSettings, SavedWorkflow, SecretSettings, Settings } from "./types";
 
 const dataDir = process.env.VERCEL ? path.join("/tmp", "recruno-automated-leads") : path.join(process.cwd(), "data");
 const stateFile = path.join(dataDir, "state.json");
 const settingsFile = path.join(dataDir, "settings.json");
+const workflowsFile = path.join(dataDir, "workflows.json");
 
 async function ensureDataDir() {
   await mkdir(dataDir, { recursive: true });
@@ -33,6 +34,7 @@ export async function getState(): Promise<AppState> {
     rejectedSerpResults: state.rejectedSerpResults ?? [],
     intentEvidenceSources: state.intentEvidenceSources ?? [],
     profileFilters: { ...DEFAULT_STATE.profileFilters, ...(state.profileFilters ?? {}) },
+    promptOverrides: { ...DEFAULT_STATE.promptOverrides, ...(state.promptOverrides ?? {}) },
     oneClick: { ...DEFAULT_STATE.oneClick, ...(state.oneClick ?? {}) },
     status: { ...DEFAULT_STATE.status, ...state.status },
     apolloTierSelection: { ...DEFAULT_STATE.apolloTierSelection, ...state.apolloTierSelection }
@@ -115,4 +117,45 @@ export function toPublicSettings(settings: Settings): PublicSettings {
     workflow: settings.workflow,
     apifyActorId: settings.APIFY_ACTOR_ID || "harvestapi/linkedin-profile-scraper"
   };
+}
+
+export async function listWorkflows(): Promise<SavedWorkflow[]> {
+  return readJson<SavedWorkflow[]>(workflowsFile, []);
+}
+
+export async function saveWorkflowSnapshot(name: string): Promise<SavedWorkflow[]> {
+  const state = await getState();
+  const workflows = await listWorkflows();
+  const now = new Date().toISOString();
+  const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || `workflow-${Date.now()}`;
+  const snapshot: SavedWorkflow = {
+    id,
+    name: name.trim() || "Untitled workflow",
+    created_at: workflows.find((workflow) => workflow.id === id)?.created_at ?? now,
+    updated_at: now,
+    summary: {
+      candidates: state.candidates.length,
+      queries: state.queries.length,
+      scored: state.candidates.filter((candidate) => typeof candidate.total_score === "number").length,
+      brief_title: state.brief?.role_titles?.join(", ") || state.brief?.jd_text?.slice(0, 80) || "No brief title"
+    },
+    state
+  };
+  const next = [snapshot, ...workflows.filter((workflow) => workflow.id !== id)];
+  await writeJson(workflowsFile, next);
+  return next;
+}
+
+export async function loadWorkflowSnapshot(id: string): Promise<AppState> {
+  const workflows = await listWorkflows();
+  const workflow = workflows.find((item) => item.id === id);
+  if (!workflow) throw new Error("Saved workflow not found.");
+  return saveState(workflow.state);
+}
+
+export async function deleteWorkflowSnapshot(id: string): Promise<SavedWorkflow[]> {
+  const workflows = await listWorkflows();
+  const next = workflows.filter((workflow) => workflow.id !== id);
+  await writeJson(workflowsFile, next);
+  return next;
 }

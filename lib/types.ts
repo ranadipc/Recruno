@@ -150,6 +150,11 @@ export type ProfileFilters = {
   exclude_terms: string[];
 };
 
+export type PromptOverrides = {
+  queryGeneration?: string;
+  scoring?: string;
+};
+
 export type Candidate = {
   id: string;
   normalized_linkedin_url: string;
@@ -248,7 +253,22 @@ export type AppState = {
   rawSerpRuns: Array<{ id: string; query_id: string; page: number; response: unknown; created_at: string }>;
   intentEvidenceSources: IntentEvidenceSource[];
   profileFilters: ProfileFilters;
+  promptOverrides: PromptOverrides;
   oneClick: OneClickRun;
   apolloTierSelection: ApolloTierSelection;
   status: AppStatus;
+};
+
+export type SavedWorkflow = {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  summary: {
+    candidates: number;
+    queries: number;
+    scored: number;
+    brief_title: string;
+  };
+  state: AppState;
 };

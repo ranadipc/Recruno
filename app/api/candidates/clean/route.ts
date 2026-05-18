@@ -9,6 +9,9 @@ export async function POST() {
   const candidates = cleaned.candidates.map((candidate) => ({
     ...candidate,
     ...(previousByUrl.get(candidate.normalized_linkedin_url) ?? {}),
+    name_guess: previousByUrl.get(candidate.normalized_linkedin_url)?.name_guess || candidate.name_guess,
+    title_guess: previousByUrl.get(candidate.normalized_linkedin_url)?.title_guess || candidate.title_guess,
+    company_guess: previousByUrl.get(candidate.normalized_linkedin_url)?.company_guess || candidate.company_guess,
     original_urls: candidate.original_urls,
     snippets: candidate.snippets,
     visibility_factor: candidate.visibility_factor,
