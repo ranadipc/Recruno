@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Recruno Automated Leads",
-  description: "Local-first LinkedIn fit and intent sourcing workflow"
+  description: "Local-first LinkedIn fit scoring sourcing workflow"
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

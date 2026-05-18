@@ -115,7 +115,7 @@ export async function POST(request: Request) {
       while (cursor < scoringSet.length) {
         const candidate = scoringSet[cursor];
         cursor += 1;
-        const analysis = await analyzeCandidate(settings, brief, candidate, "fit_intent");
+        const analysis = await analyzeCandidate(settings, brief, candidate, "fit");
         analysisById.set(candidate.id, analysis);
       }
     }));
@@ -125,8 +125,8 @@ export async function POST(request: Request) {
       { step: "SerpAPI results", count: serpResults.length, note: `${selected.length} selected queries across ${pages} page(s)` },
       { step: "Profile URLs", count: cleaned.candidates.length, note: "Normalized and deduplicated linkedin.com/in profiles" },
       { step: "Apify success/partial", count: scored.filter((candidate) => candidate.apify_status === "apify_success" || candidate.apify_status === "apify_partial").length, note: "Visible profile data merged" },
-      { step: "Fit shortlist", count: scored.filter((candidate) => Number(candidate.fit_score ?? 0) >= 45).length, note: "Fit score 45+/70" },
-      { step: "Intent shortlist", count: scored.filter((candidate) => Number(candidate.intent_score ?? 0) >= 15).length, note: "Intent score 15+/30" },
+      { step: "Strong fit shortlist", count: scored.filter((candidate) => Number(candidate.total_score ?? candidate.fit_score ?? 0) > 80).length, note: "Fit score above 80/100" },
+      { step: "Qualified fit shortlist", count: scored.filter((candidate) => Number(candidate.total_score ?? candidate.fit_score ?? 0) >= 60).length, note: "Fit score 60+/100" },
       { step: "Tier 1/2 shortlist", count: scored.filter((candidate) => candidate.tier === "Tier 1" || candidate.tier === "Tier 2").length, note: "Ready for manual review before Apollo" }
     ];
 

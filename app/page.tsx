@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ApolloTierSelection, AppState, Candidate, ProfileFilters, PublicSettings, Query, QueryType, SavedWorkflow, Tier, WorkflowSettings } from "@/lib/types";
 import { DEFAULT_APOLLO_TIERS, DEFAULT_WORKFLOW } from "@/lib/defaults";
 
@@ -12,7 +12,7 @@ const steps = [
   "Clean + Dedupe",
   "Apify Profiles",
   "Profile Filters",
-  "OpenAI Scoring",
+  "OpenAI Fit Score",
   "Review + Download",
   "Apollo Enrichment",
   "Final Sheet"
@@ -111,19 +111,46 @@ function Field({ label, value, onChange, placeholder, textarea = false, type = "
   );
 }
 
-function defaultPromptOverride(kind: "queryGeneration" | "scoring") {
+type PromptKind = "queryGeneration" | "profileFilters" | "scoring";
+
+function workflowWeight(value: AppState) {
+  return [
+    value.brief ? 25 : 0,
+    value.queries.length,
+    value.serpResults.length,
+    value.rejectedSerpResults.length,
+    value.candidates.length * 2,
+    value.rawSerpRuns.length,
+    value.intentEvidenceSources.length,
+    value.oneClick?.candidates?.length ?? 0
+  ].reduce((sum, item) => sum + item, 0);
+}
+
+function defaultPromptOverride(kind: PromptKind) {
   if (kind === "queryGeneration") {
     return [
       "Generate practical recruiter X-ray queries.",
-      "Prioritize high-signal title, current company, past company, location, keywords, education, and intent combinations.",
+      "Prioritize high-signal title, current company, past company, location, keywords, education, and movement-signal combinations.",
       "Do not use experience proxy years in search queries.",
       "Keep India-focused query helpers when India/Bangalore/Mumbai/etc. is requested."
+    ].join("\n");
+  }
+  if (kind === "profileFilters") {
+    return [
+      "Apply filters only to parsed profile evidence, not to weak keyword mentions.",
+      "Actual location should come from the LinkedIn profile location first, then strong SerpAPI location evidence.",
+      "Do not reject uncertain profiles silently. Label fail reasons and allow manual inclusion.",
+      "Experience, tenure, promotion, Open to Work, and layoff checks belong here after Apify parsing."
     ].join("\n");
   }
   return [
     "Rank candidates by surety of good match.",
     "Use visibility_factor as a confidence signal when the repeated matches are relevant.",
     "Prefer Apify-backed profile evidence over SerpAPI snippets.",
+    "Score fit out of 100 using a role-specific rubric you derive from the JD.",
+    "Choose the rubric weights yourself based on what matters for this role, such as title, company, past company, actual location, keywords, experience, tenure, education, exclusions, and evidence certainty.",
+    "Use Open to Work, layoff, tenure, and no-promotion as supporting signals only. They should help prioritize strong-fit candidates, not inflate weak-fit candidates.",
+    "Set total_score equal to the final fit score out of 100.",
     "A high score should require strong fit plus clear evidence for title, company, actual location, keywords, and seniority.",
     "If evidence is weak or location/company/title is uncertain, lower confidence and add manual checks."
   ].join("\n");
@@ -137,10 +164,11 @@ export default function Home() {
     apifyActorId: "harvestapi/linkedin-profile-scraper"
   });
   const [activeStep, setActiveStep] = useState(1);
+  const [hydrated, setHydrated] = useState(false);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [evidenceCandidate, setEvidenceCandidate] = useState<Candidate | null>(null);
-  const [promptEditor, setPromptEditor] = useState<"queryGeneration" | "scoring" | null>(null);
+  const [promptEditor, setPromptEditor] = useState<PromptKind | null>(null);
   const [promptDraft, setPromptDraft] = useState("");
   const [savedWorkflows, setSavedWorkflows] = useState<SavedWorkflow[]>([]);
   const [workflowName, setWorkflowName] = useState("PM workflow");
@@ -183,10 +211,35 @@ export default function Home() {
   const [useAllNonRejected, setUseAllNonRejected] = useState(true);
   const [apolloEstimate, setApolloEstimate] = useState<Estimate>(null);
   const [finalFilter, setFinalFilter] = useState({ tier: "all", contact: "all", search: "" });
+  const stateRef = useRef<AppState>(emptyState());
+  const busyRef = useRef("");
+
+  function commitState(nextState: AppState, options: { allowWeaker?: boolean; reason?: string } = {}) {
+    const current = stateRef.current;
+    const currentWeight = workflowWeight(current);
+    const nextWeight = workflowWeight(nextState);
+    if (!options.allowWeaker && busyRef.current && nextWeight < currentWeight) {
+      if (process.env.NODE_ENV === "development") {
+        console.warn("[Recruno] Ignored stale/weaker workflow snapshot during busy action", {
+          busy: busyRef.current,
+          reason: options.reason,
+          currentWeight,
+          nextWeight,
+          currentCandidates: current.candidates.length,
+          nextCandidates: nextState.candidates.length
+        });
+      }
+      return false;
+    }
+    stateRef.current = nextState;
+    setState(nextState);
+    return true;
+  }
 
   async function refresh(keepStep = false) {
     const [nextState, nextSettings, workflows] = await Promise.all([api<AppState>("/api/state"), api<PublicSettings>("/api/settings"), api<SavedWorkflow[]>("/api/workflows")]);
-    setState(nextState);
+    const accepted = commitState(nextState, { reason: "refresh" });
+    if (!accepted) return;
     setSettings(nextSettings);
     setSavedWorkflows(workflows);
     setWorkflow(nextSettings.workflow);
@@ -194,6 +247,7 @@ export default function Home() {
     setTierSelection(nextState.apolloTierSelection);
     setProfileFilterForm(nextState.profileFilters);
     if (!keepStep) setActiveStep(Math.min(nextState.status.currentStep || 1, steps.length));
+    setHydrated(true);
   }
 
   useEffect(() => {
@@ -201,11 +255,11 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!busy) return;
-    const timer = window.setInterval(() => {
-      refresh(true).catch(() => undefined);
-    }, 2500);
-    return () => window.clearInterval(timer);
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    busyRef.current = busy;
   }, [busy]);
 
   useEffect(() => {
@@ -220,26 +274,27 @@ export default function Home() {
     setNotice("");
     if (state.status.errors.length > 0) {
       const next = await api<AppState>("/api/state", { method: "POST", body: JSON.stringify({ clearErrors: true }) });
-      setState(next);
+      commitState(next, { reason: "clear toast" });
     }
   }
 
   async function runAction<T>(label: string, action: () => Promise<T>, after?: (value: T) => void) {
     if (busy) return;
     if (process.env.NODE_ENV === "development") console.log(`[Recruno] ${label} started`);
+    busyRef.current = label;
     setBusy(label);
     setNotice("");
     try {
       const result = await action();
       after?.(result);
-      if (!after && result && typeof result === "object" && "status" in result) setState(result as unknown as AppState);
-      await refresh(true);
+      if (!after && result && typeof result === "object" && "status" in result) commitState(result as unknown as AppState, { reason: label });
       setNotice(`${label} completed`);
       if (process.env.NODE_ENV === "development") console.log(`[Recruno] ${label} completed`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : `${label} failed`);
       if (process.env.NODE_ENV === "development") console.error(`[Recruno] ${label} failed`, error);
     } finally {
+      busyRef.current = "";
       setBusy("");
     }
   }
@@ -256,7 +311,7 @@ export default function Home() {
   const isOneClick = activeStep === 12;
   const oneClickCandidates = state.oneClick.candidates.filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"));
 
-  function openPromptEditor(kind: "queryGeneration" | "scoring") {
+  function openPromptEditor(kind: PromptKind) {
     setPromptEditor(kind);
     setPromptDraft(state.promptOverrides[kind] || defaultPromptOverride(kind));
   }
@@ -264,9 +319,15 @@ export default function Home() {
   async function savePromptOverride() {
     if (!promptEditor) return;
     const next = await api<AppState>("/api/prompts", { method: "POST", body: JSON.stringify({ [promptEditor]: promptDraft }) });
-    setState(next);
+    commitState(next, { reason: "save prompt" });
     setPromptEditor(null);
     setNotice("Prompt saved");
+  }
+
+  async function manualRefresh() {
+    setNotice("");
+    await refresh(true);
+    setNotice("Step refreshed");
   }
 
   const selectedForApollo = useMemo(() => {
@@ -313,26 +374,26 @@ export default function Home() {
   function updateQuery(index: number, patch: Partial<Query>) {
     const queries = [...state.queries];
     queries[index] = { ...queries[index], ...patch };
-    setState({ ...state, queries });
+    commitState({ ...state, queries }, { reason: "local query edit" });
   }
 
   function updateCandidate(id: string, patch: Partial<Candidate>) {
-    setState({ ...state, candidates: state.candidates.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)) });
+    commitState({ ...state, candidates: state.candidates.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)) }, { reason: "local candidate edit" });
   }
 
   async function saveQueries() {
     const next = await api<AppState>("/api/queries/update", { method: "POST", body: JSON.stringify({ queries: state.queries }) });
-    setState(next);
+    commitState(next, { reason: "save queries" });
   }
 
   async function saveCandidates() {
     const next = await api<AppState>("/api/candidates/update", { method: "POST", body: JSON.stringify({ candidates: state.candidates }) });
-    setState(next);
+    commitState(next, { reason: "save candidates" });
   }
 
   async function saveBriefAndContinue() {
     await runAction("Save brief", () => api<AppState>("/api/brief", { method: "POST", body: JSON.stringify(briefForm) }), (next) => {
-      setState(next);
+      commitState(next, { reason: "save brief" });
       setActiveStep(3);
     });
   }
@@ -344,7 +405,7 @@ export default function Home() {
 
   async function loadWorkflow(id: string) {
     const response = await api<{ state: AppState; workflows: SavedWorkflow[] }>("/api/workflows", { method: "POST", body: JSON.stringify({ action: "load", id }) });
-    setState(response.state);
+    commitState(response.state, { allowWeaker: true, reason: "load workflow" });
     setSavedWorkflows(response.workflows);
     setActiveStep(Math.min(response.state.status.currentStep || 1, steps.length));
   }
@@ -360,12 +421,12 @@ export default function Home() {
     const response = await fetch("/api/import", { method: "POST", body: form });
     const next = await response.json();
     if (!response.ok) throw new Error(next.error || "Import failed.");
-    setState(next);
+    commitState(next, { allowWeaker: true, reason: "import" });
   }
 
   async function resetData() {
     const next = await api<AppState>("/api/state", { method: "DELETE" });
-    setState(next);
+    commitState(next, { allowWeaker: true, reason: "reset data" });
     setActiveStep(1);
     setNotice("Workflow data reset");
   }
@@ -403,13 +464,15 @@ export default function Home() {
       </aside>
 
       <section className="workspace">
+        {!hydrated && <div className="app-loading"><div className="spinner" /><strong>Loading saved workflow state...</strong></div>}
         <header className="topbar">
           <div>
             <h2>{isOneClick ? "One Click" : steps[activeStep - 1]}</h2>
-            <p>{isOneClick ? "Paste a JD, click Start, and stop at the scored shortlist before Apollo." : helperCopy(activeStep)}</p>
+                <p>{isOneClick ? "Paste a JD, click Start, and stop at the scored shortlist before Apollo." : helperCopy(activeStep)}</p>
           </div>
           <div className="top-actions">
             <span className="mode real">Live API mode</span>
+            <SmallButton disabled={Boolean(busy)} onClick={() => runAction("Refresh step", manualRefresh)}>Refresh</SmallButton>
           </div>
         </header>
 
@@ -417,7 +480,7 @@ export default function Home() {
           <WorkflowProgress activeStep={activeStep} />
         ) : (
           <div className="top-stepper one-click-steps">
-            {["Upload JD", "Generate searches", "Find profiles", "Scrape profiles", "Score fit + intent", "Download shortlist"].map((step, index) => <button key={step} className={state.oneClick.status === "completed" || index === 0 ? "done" : ""}>{step}</button>)}
+            {["Upload JD", "Generate searches", "Find profiles", "Scrape profiles", "Score fit", "Download shortlist"].map((step, index) => <button key={step} className={state.oneClick.status === "completed" || index === 0 ? "done" : ""}>{step}</button>)}
           </div>
         )}
 
@@ -512,7 +575,7 @@ export default function Home() {
               <Field label="Keywords" value={briefForm.keywords} onChange={(value) => setBriefForm({ ...briefForm, keywords: value })} placeholder="fintech, payments, HR, legal, AI, solar, EPC, AutoCAD" />
               <Field label="Education keywords" value={briefForm.education} onChange={(value) => setBriefForm({ ...briefForm, education: value })} />
               <Field label="Location keywords" value={briefForm.locations} onChange={(value) => setBriefForm({ ...briefForm, locations: value })} />
-              <Field label="Intent keywords" value={briefForm.intent_terms} onChange={(value) => setBriefForm({ ...briefForm, intent_terms: value })} />
+              <Field label="Availability / movement signals" value={briefForm.intent_terms} onChange={(value) => setBriefForm({ ...briefForm, intent_terms: value })} />
               <Field label="Exclusion keywords" value={briefForm.exclusions} onChange={(value) => setBriefForm({ ...briefForm, exclusions: value })} />
             </div>
             <Field label="Free-text JD / client brief" textarea value={briefForm.jd_text} onChange={(value) => setBriefForm({ ...briefForm, jd_text: value })} placeholder="Paste the client brief or role notes." />
@@ -533,8 +596,8 @@ export default function Home() {
             {state.queries.length > 0 && (
               <details className="details-card" open>
                 <summary>Review query list</summary>
-                <QueryTable queries={state.queries} updateQuery={updateQuery} removeQuery={(index) => setState({ ...state, queries: state.queries.filter((_, idx) => idx !== index) })} />
-                <div className="actions"><SmallButton onClick={() => setState({ ...state, queries: [...state.queries, { id: `manual_${Date.now()}`, brief_id: state.brief?.id ?? "manual", query_text: "site:linkedin.com/in ", query_type: "career_path", expected_filters: [], selected: true, priority: 5, notes: "Manual query" }] })}>Add Manual Query</SmallButton><SmallButton onClick={() => runAction("Save queries", saveQueries)}>Save Query Edits</SmallButton></div>
+                <QueryTable queries={state.queries} updateQuery={updateQuery} removeQuery={(index) => commitState({ ...state, queries: state.queries.filter((_, idx) => idx !== index) }, { reason: "remove query" })} />
+                <div className="actions"><SmallButton onClick={() => commitState({ ...state, queries: [...state.queries, { id: `manual_${Date.now()}`, brief_id: state.brief?.id ?? "manual", query_text: "site:linkedin.com/in ", query_type: "career_path", expected_filters: [], selected: true, priority: 5, notes: "Manual query" }] }, { reason: "add manual query" })}>Add Manual Query</SmallButton><SmallButton onClick={() => runAction("Save queries", saveQueries)}>Save Query Edits</SmallButton></div>
               </details>
             )}
           </section>
@@ -598,14 +661,14 @@ export default function Home() {
               <label className="switch-row"><input type="checkbox" checked={profileFilterForm.require_no_promotion_signal} onChange={(event) => setProfileFilterForm({ ...profileFilterForm, require_no_promotion_signal: event.target.checked })} /> Require no-promotion signal</label>
             </div>
             <div className="summary-cards"><Metric label="Total parsed" value={profileCandidates.filter((c) => c.apify_status !== "pending_apify").length} /><Metric label="Passed" value={profileCandidates.filter((c) => c.passes_profile_filter).length} /><Metric label="Failed" value={profileCandidates.filter((c) => c.passes_profile_filter === false).length} /><Metric label="Location unknown" value={profileCandidates.filter((c) => c.actual_location_status === "unknown").length} /></div>
-            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Apply profile filters", () => api<AppState>("/api/profile-filters/run", { method: "POST", body: JSON.stringify(profileFilterForm) }))}>Apply Profile Filters</SmallButton></div>
+            <div className="actions"><SmallButton onClick={() => openPromptEditor("profileFilters")}>Edit Filter Logic</SmallButton><SmallButton variant="primary" onClick={() => runAction("Apply profile filters", () => api<AppState>("/api/profile-filters/run", { method: "POST", body: JSON.stringify(profileFilterForm) }))}>Apply Profile Filters</SmallButton></div>
             <ProfileFilterTable candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save profile filter decisions", saveCandidates)} />
           </section>
         )}
 
         {activeStep === 8 && (
           <section className="panel simple">
-            <div className="section-heading"><h3>Score fit and intent</h3><p>Scores rank candidates. They do not remove anyone automatically.</p></div>
+            <div className="section-heading"><h3>Score fit</h3><p>Fit score ranks candidates out of 100. Supporting signals are evidence, not a separate score.</p></div>
             <div className="cost-panel">
               <div>
                 <strong>Cost saver is on</strong>
@@ -614,7 +677,7 @@ export default function Home() {
               <label><span>Max candidates</span><input type="number" min={1} value={scoreSettings.maxCandidates} onChange={(event) => setScoreSettings({ ...scoreSettings, maxCandidates: Number(event.target.value) })} /></label>
               <label className="switch-row"><input type="checkbox" checked={scoreSettings.onlyScraped} onChange={(event) => setScoreSettings({ ...scoreSettings, onlyScraped: event.target.checked })} /> scored scraped/partial only</label>
             </div>
-            <div className="actions"><SmallButton onClick={() => openPromptEditor("scoring")}>Edit Prompt</SmallButton><SmallButton variant="primary" onClick={() => runAction("Fit + Intent", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit_intent", ...scoreSettings }) }))}>Fit + Intent</SmallButton><SmallButton onClick={() => runAction("Fit Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Fit Only</SmallButton><SmallButton onClick={() => runAction("Intent Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "intent", ...scoreSettings }) }))}>Intent Only</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
+            <div className="actions"><SmallButton onClick={() => openPromptEditor("scoring")}>Edit Prompt</SmallButton><SmallButton variant="primary" onClick={() => runAction("Fit scoring", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Run Fit Score</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
             <div className="summary-cards"><Metric label="Profiles" value={profileCandidates.length} /><Metric label="Scored" value={scoredCount} /><Metric label="Scraped/partial" value={apifySuccessCount + apifyPartialCount} /><Metric label="Default cap" value={scoreSettings.maxCandidates} /></div>
             <ScoredTable candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save scores", saveCandidates)} onEvidence={setEvidenceCandidate} />
           </section>
@@ -646,7 +709,7 @@ export default function Home() {
             </div>
             <div className="estimate large">Selected: <strong>{liveEstimate.selected}</strong>. Email credits = <strong>{liveEstimate.email}</strong>. Phone credits = <strong>{liveEstimate.phone}</strong> x 8 = <strong>{liveEstimate.phone * 8}</strong>. Total approx = <strong>{liveEstimate.total}</strong>.</div>
             {apolloEstimate && <div className="subtle">Last server estimate: {apolloEstimate.selected} selected, {apolloEstimate.total} credits.</div>}
-            <div className="actions"><SmallButton onClick={() => runAction("Estimate Apollo credits", () => api<{ state: AppState; estimate: Estimate; message: string }>("/api/apollo/enrich", { method: "POST", body: JSON.stringify({ selection: tierSelection, confirm: false, useAllNonRejected }) }), (value) => { setState(value.state); setApolloEstimate(value.estimate); setNotice(value.message); })}>Estimate Credits</SmallButton><SmallButton variant="primary" onClick={() => runAction("Apollo enrichment", () => api<{ state: AppState; estimate: Estimate }>("/api/apollo/enrich", { method: "POST", body: JSON.stringify({ selection: tierSelection, confirm: true, useAllNonRejected }) }), (value) => { setState(value.state); setApolloEstimate(value.estimate); })}>Confirm + Run Apollo</SmallButton></div>
+            <div className="actions"><SmallButton onClick={() => runAction("Estimate Apollo credits", () => api<{ state: AppState; estimate: Estimate; message: string }>("/api/apollo/enrich", { method: "POST", body: JSON.stringify({ selection: tierSelection, confirm: false, useAllNonRejected }) }), (value) => { commitState(value.state, { reason: "apollo estimate" }); setApolloEstimate(value.estimate); setNotice(value.message); })}>Estimate Credits</SmallButton><SmallButton variant="primary" onClick={() => runAction("Apollo enrichment", () => api<{ state: AppState; estimate: Estimate }>("/api/apollo/enrich", { method: "POST", body: JSON.stringify({ selection: tierSelection, confirm: true, useAllNonRejected }) }), (value) => { commitState(value.state, { reason: "apollo enrichment" }); setApolloEstimate(value.estimate); })}>Confirm + Run Apollo</SmallButton></div>
           </section>
         )}
 
@@ -691,7 +754,7 @@ export default function Home() {
                     variant="primary"
                     disabled={busy === "One Click run"}
                     onClick={() => runAction("One Click run", () => api<AppState["oneClick"]>("/api/one-click/run", { method: "POST", body: JSON.stringify({ jd_text: oneClickText || state.oneClick.jd_text, ...oneClickSettings }) }), (value) => {
-                      setState({ ...state, oneClick: value });
+                      commitState({ ...state, oneClick: value }, { reason: "one click" });
                       setNotice(`One Click completed with ${value.candidates.length} scored profiles`);
                     })}
                   >
@@ -738,7 +801,7 @@ function helperCopy(step: number) {
     "Turn search results into clean LinkedIn profile candidates.",
     "Scrape visible profile details while preserving source evidence.",
     "Filter on actual parsed profile fields before scoring.",
-    "Score fit and intent using the brief and merged candidate data.",
+    "Score fit using the brief and merged candidate data.",
     "Approve, reject, or annotate before contact enrichment.",
     "Estimate Apollo credits and enrich selected tiers.",
     "Review and export the recruiter-ready sheet."
@@ -840,11 +903,21 @@ function StepFooter({ activeStep, setActiveStep, maxStep, busy }: { activeStep: 
 }
 
 function QueryTable({ queries, updateQuery, removeQuery }: { queries: Query[]; updateQuery: (index: number, patch: Partial<Query>) => void; removeQuery: (index: number) => void }) {
+  const queryTypeLabel = (type: QueryType) => ({
+    profile_location: "Profile location",
+    profile_keyword: "Profile keyword",
+    profile_domain: "Profile keyword",
+    profile_education: "Profile education",
+    career_path: "Career path",
+    intent_post: "Signal post",
+    layoff_post: "Layoff post",
+    hiring_comment: "Hiring comment"
+  })[type];
   return (
     <div className="table-wrap">
       <table>
         <thead><tr><th>Use</th><th>Query</th><th>Type</th><th>Filters</th><th>Priority</th><th>Notes</th><th /></tr></thead>
-        <tbody>{queries.map((query, index) => <tr key={query.id}><td><input type="checkbox" checked={query.selected} onChange={(event) => updateQuery(index, { selected: event.target.checked })} /></td><td><textarea value={query.query_text} onChange={(event) => updateQuery(index, { query_text: event.target.value })} rows={2} /></td><td><select value={query.query_type} onChange={(event) => updateQuery(index, { query_type: event.target.value as QueryType })}>{queryTypes.map((type) => <option key={type}>{type}</option>)}</select></td><td><input value={query.expected_filters.join(", ")} onChange={(event) => updateQuery(index, { expected_filters: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} /></td><td><input type="number" value={query.priority} onChange={(event) => updateQuery(index, { priority: Number(event.target.value) })} /></td><td><input value={query.notes} onChange={(event) => updateQuery(index, { notes: event.target.value })} /></td><td><SmallButton variant="danger" onClick={() => removeQuery(index)}>Delete</SmallButton></td></tr>)}</tbody>
+        <tbody>{queries.map((query, index) => <tr key={query.id}><td><input type="checkbox" checked={query.selected} onChange={(event) => updateQuery(index, { selected: event.target.checked })} /></td><td><textarea value={query.query_text} onChange={(event) => updateQuery(index, { query_text: event.target.value })} rows={2} /></td><td><select value={query.query_type} onChange={(event) => updateQuery(index, { query_type: event.target.value as QueryType })}>{queryTypes.map((type) => <option key={type} value={type}>{queryTypeLabel(type)}</option>)}</select></td><td><input value={query.expected_filters.join(", ")} onChange={(event) => updateQuery(index, { expected_filters: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} /></td><td><input type="number" value={query.priority} onChange={(event) => updateQuery(index, { priority: Number(event.target.value) })} /></td><td><input value={query.notes} onChange={(event) => updateQuery(index, { notes: event.target.value })} /></td><td><SmallButton variant="danger" onClick={() => removeQuery(index)}>Delete</SmallButton></td></tr>)}</tbody>
       </table>
     </div>
   );
@@ -929,8 +1002,8 @@ function ScoredTable({ candidates, updateCandidate, saveCandidates, onEvidence, 
       <div className="filters"><label><span>Tier filter</span><select value={tierFilter} onChange={(event) => setTierFilter(event.target.value)}><option value="all">All tiers</option>{tiers.map((tier) => <option key={tier}>{tier}</option>)}</select></label></div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>LinkedIn</th><th>Fit</th><th>Intent</th><th>Total</th><th>Tier</th><th>Visibility</th><th>Evidence</th>{manual && <th>Review</th>}<th>Notes</th></tr></thead>
-          <tbody>{visible.map((candidate) => <tr key={candidate.id}><td>{displayName(candidate)}</td><td><a href={profileUrl(candidate)} target="_blank">Open profile</a></td><td><input type="number" value={candidate.fit_score ?? 0} onChange={(event) => updateCandidate(candidate.id, { fit_score: Number(event.target.value) })} /></td><td><input type="number" value={candidate.intent_score ?? 0} onChange={(event) => updateCandidate(candidate.id, { intent_score: Number(event.target.value) })} /></td><td><input type="number" value={candidate.total_score ?? 0} onChange={(event) => updateCandidate(candidate.id, { total_score: Number(event.target.value) })} /></td><td><select className={badgeClass(candidate.tier)} value={candidate.tier ?? "Tier 4"} onChange={(event) => updateCandidate(candidate.id, { tier: event.target.value as Tier })}>{tiers.map((tier) => <option key={tier}>{tier}</option>)}</select></td><td><span className="badge neutral">Visibility: {candidate.visibility_factor}</span></td><td><button className="link-button" onClick={() => onEvidence(candidate)}>View evidence</button></td>{manual && <td><select value={candidate.manual_status} onChange={(event) => updateCandidate(candidate.id, { manual_status: event.target.value as Candidate["manual_status"] })}><option value="pending">pending</option><option value="approved">approved</option><option value="rejected">rejected</option></select><label className="inline-check"><input type="checkbox" checked={candidate.needs_contact_enrichment} onChange={(event) => updateCandidate(candidate.id, { needs_contact_enrichment: event.target.checked })} /> enrich</label></td>}<td><textarea value={candidate.manual_notes} onChange={(event) => updateCandidate(candidate.id, { manual_notes: event.target.value })} rows={2} /></td></tr>)}</tbody>
+          <thead><tr><th>Name</th><th>LinkedIn</th><th>Fit / 100</th><th>Tier</th><th>Visibility</th><th>Evidence</th>{manual && <th>Review</th>}<th>Notes</th></tr></thead>
+          <tbody>{visible.map((candidate) => <tr key={candidate.id}><td>{displayName(candidate)}</td><td><a href={profileUrl(candidate)} target="_blank">Open profile</a></td><td><input type="number" value={candidate.total_score ?? candidate.fit_score ?? 0} onChange={(event) => updateCandidate(candidate.id, { fit_score: Number(event.target.value), total_score: Number(event.target.value) })} /></td><td><select className={badgeClass(candidate.tier)} value={candidate.tier ?? "Tier 4"} onChange={(event) => updateCandidate(candidate.id, { tier: event.target.value as Tier })}>{tiers.map((tier) => <option key={tier}>{tier}</option>)}</select></td><td><span className="badge neutral">Visibility: {candidate.visibility_factor}</span></td><td><button className="link-button" onClick={() => onEvidence(candidate)}>View evidence</button></td>{manual && <td><select value={candidate.manual_status} onChange={(event) => updateCandidate(candidate.id, { manual_status: event.target.value as Candidate["manual_status"] })}><option value="pending">pending</option><option value="approved">approved</option><option value="rejected">rejected</option></select><label className="inline-check"><input type="checkbox" checked={candidate.needs_contact_enrichment} onChange={(event) => updateCandidate(candidate.id, { needs_contact_enrichment: event.target.checked })} /> enrich</label></td>}<td><textarea value={candidate.manual_notes} onChange={(event) => updateCandidate(candidate.id, { manual_notes: event.target.value })} rows={2} /></td></tr>)}</tbody>
         </table>
       </div>
       <div className="actions"><SmallButton onClick={saveCandidates}>Save Review</SmallButton></div>
@@ -956,7 +1029,7 @@ function FunnelCard({ funnel }: { funnel: Array<{ step: string; count: number; n
     { step: "Profile URLs", count: 300, note: "After normalize and dedupe" },
     { step: "Apify success", count: 280, note: "Profiles extracted" },
     { step: "Fit shortlist", count: 200, note: "Matched role filters" },
-    { step: "Intent shortlist", count: 50, note: "Intent signals found" },
+    { step: "Signal-backed shortlist", count: 50, note: "Extra movement signals found" },
     { step: "Tier 1/2 shortlist", count: 30, note: "Ready before Apollo" }
   ];
   const rows = funnel.length ? funnel : fallback;
@@ -992,7 +1065,7 @@ function OneClickScoredTable({ candidates, onEvidence }: { candidates: Candidate
   return (
     <div className="table-wrap final">
       <table>
-        <thead><tr><th>Name</th><th>LinkedIn profile</th><th>Title</th><th>Company</th><th>Fit</th><th>Intent</th><th>Total</th><th>Tier</th><th>Visibility</th><th>Evidence</th></tr></thead>
+        <thead><tr><th>Name</th><th>LinkedIn profile</th><th>Title</th><th>Company</th><th>Fit / 100</th><th>Tier</th><th>Visibility</th><th>Evidence</th></tr></thead>
         <tbody>
           {candidates.map((candidate) => (
             <tr key={candidate.id}>
@@ -1000,9 +1073,7 @@ function OneClickScoredTable({ candidates, onEvidence }: { candidates: Candidate
               <td><a href={profileUrl(candidate)} target="_blank">{candidate.normalized_linkedin_url}</a></td>
               <td>{candidate.profile_data?.current_title || candidate.title_guess}</td>
               <td>{candidate.profile_data?.current_company || candidate.company_guess}</td>
-              <td>{candidate.fit_score ?? ""}</td>
-              <td>{candidate.intent_score ?? ""}</td>
-              <td className="key-col">{candidate.total_score ?? ""}</td>
+              <td className="key-col">{candidate.total_score ?? candidate.fit_score ?? ""}</td>
               <td><span className={badgeClass(candidate.tier)}>{candidate.tier ?? "Tier 4"}</span></td>
               <td><span className="badge neutral">Visibility: {candidate.visibility_factor}</span></td>
               <td><button className="link-button evidence-preview" onClick={() => onEvidence(candidate)}>{[...candidate.fit_evidence, ...candidate.intent_evidence].join("; ") || "View evidence"}</button></td>
@@ -1022,7 +1093,7 @@ function EvidenceDrawer({ candidate, onClose }: { candidate: Candidate; onClose:
         <ProfileSnapshot candidate={candidate} />
         <LinkedInScrapeData candidate={candidate} />
         <EvidenceSection title="Fit evidence" items={candidate.fit_evidence} />
-        <EvidenceSection title="Intent evidence" items={candidate.intent_evidence} />
+        <EvidenceSection title="Supporting signals" items={candidate.intent_evidence} />
         <EvidenceSection title="Matched queries" items={candidate.matched_filter_hints} />
         <EvidenceSection title="Snippets" items={candidate.snippets} />
         <EvidenceSection title="Post evidence sources" items={(candidate.intent_evidence_sources ?? []).map((source) => `${source.source_status}: ${source.url} - ${source.snippet}`)} />
@@ -1038,8 +1109,7 @@ function ProfileSnapshot({ candidate }: { candidate: Candidate }) {
   const fields = [
     ["Score", candidate.total_score ?? ""],
     ["Tier", candidate.tier ?? ""],
-    ["Fit", candidate.fit_score ?? ""],
-    ["Intent", candidate.intent_score ?? ""],
+    ["Fit / 100", candidate.total_score ?? candidate.fit_score ?? ""],
     ["Title", profile?.current_title || candidate.title_guess],
     ["Company", profile?.current_company || candidate.company_guess],
     ["Location", profile?.location || ""],
@@ -1128,14 +1198,15 @@ function EvidenceSection({ title, items }: { title: string; items: string[] }) {
   return <section className="drawer-section"><h4>{title}</h4>{items.length ? <ul>{items.map((item, index) => <li key={`${title}-${index}`}>{item}</li>)}</ul> : <p className="subtle">No data captured.</p>}</section>;
 }
 
-function PromptModal({ kind, value, onChange, onSave, onClose }: { kind: "queryGeneration" | "scoring"; value: string; onChange: (value: string) => void; onSave: () => void; onClose: () => void }) {
+function PromptModal({ kind, value, onChange, onSave, onClose }: { kind: PromptKind; value: string; onChange: (value: string) => void; onSave: () => void; onClose: () => void }) {
+  const title = kind === "queryGeneration" ? "Query Generation" : kind === "profileFilters" ? "Profile Filter Logic" : "Fit Scoring";
   return (
     <div className="drawer-backdrop" onClick={onClose}>
       <aside className="prompt-modal" onClick={(event) => event.stopPropagation()}>
         <div className="drawer-head">
           <div>
-            <h3>Edit {kind === "queryGeneration" ? "Query Generation" : "Fit + Intent Scoring"} Prompt</h3>
-            <p>The app still adds the required JSON schema and candidate/JD context server-side.</p>
+            <h3>Edit {title}</h3>
+            <p>The app still adds the required schema and candidate/JD context server-side.</p>
           </div>
           <SmallButton onClick={onClose}>Close</SmallButton>
         </div>

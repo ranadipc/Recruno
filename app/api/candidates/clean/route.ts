@@ -24,7 +24,7 @@ export async function POST() {
   }));
   const next = await patchState(
     { candidates, intentEvidenceSources: cleaned.intentEvidenceSources, rejectedSerpResults: cleaned.rejectedResults, status: { currentStep: 6, errors: [] } as never },
-    `Cleaned ${candidates.length} LinkedIn profiles, removed ${cleaned.duplicatesRemoved} duplicates, rejected ${cleaned.rejectedResults.length} results, and stored ${cleaned.intentEvidenceSources.length} post results as intent evidence.`
+    `Cleaned ${candidates.length} LinkedIn profiles, removed ${cleaned.duplicatesRemoved} duplicates, rejected ${cleaned.rejectedResults.length} results, and stored ${cleaned.intentEvidenceSources.length} post results as supporting evidence.`
   );
   return NextResponse.json(next);
 }

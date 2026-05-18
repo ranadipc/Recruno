@@ -5,7 +5,7 @@ import { getSettings, getState, patchState } from "@/lib/store";
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
-    const mode = body.mode ?? "fit_intent";
+    const mode = body.mode ?? "fit";
     const maxCandidates = Math.max(1, Number(body.maxCandidates ?? 50));
     const onlyScraped = body.onlyScraped !== false;
     const settings = await getSettings();
@@ -36,11 +36,11 @@ export async function POST(request: Request) {
     const updated = state.candidates.map((candidate) => analyzed.has(candidate.id) ? { ...candidate, ...analyzed.get(candidate.id)! } : candidate);
     const next = await patchState(
       { candidates: updated, status: { currentStep: 9, errors: [] } as never },
-      `Fit and intent analysis completed for ${analyzed.size} candidates.`
+      `Fit scoring completed for ${analyzed.size} candidates.`
     );
     return NextResponse.json(next);
   } catch (error) {
-    const state = await patchState({ status: { errors: [error instanceof Error ? error.message : "Fit/intent analysis failed."] } as never });
+    const state = await patchState({ status: { errors: [error instanceof Error ? error.message : "Fit scoring failed."] } as never });
     return NextResponse.json(state, { status: 400 });
   }
 }

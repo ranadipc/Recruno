@@ -1,6 +1,6 @@
 # Recruno Automated Leads
 
-Local-first proof-of-work app for turning a client hiring brief into a recruiter-ready LinkedIn candidate sheet with evidence, fit scoring, intent scoring, manual review, Apollo enrichment, and exports.
+Local-first proof-of-work app for turning a client hiring brief into a recruiter-ready LinkedIn candidate sheet with evidence, fit scoring, manual review, Apollo enrichment, and exports.
 
 ## What It Demonstrates
 
@@ -15,8 +15,8 @@ The workflow is:
 7. Strict SerpAPI result classification for LinkedIn profile/post/job/company pages and India/foreign/unknown location evidence
 8. LinkedIn URL normalization and deduplication
 9. Apify profile extraction using `harvestapi/linkedin-profile-scraper`
-10. Profile Filters on parsed Apify data, including actual location, title, company, keywords, education, tenure, and intent flags
-11. OpenAI / ChatGPT fit + intent analysis
+10. Profile Filters on parsed Apify data, including actual location, title, company, keywords, education, tenure, and movement signals
+11. OpenAI / ChatGPT fit scoring
 12. Manual recruiter review
 13. Apollo-only contact enrichment
 14. CSV, XLSX, and JSON recruiter sheet export
@@ -25,7 +25,7 @@ There is also a **One Click** mode in the sidebar. It is a separate fast lane:
 
 1. Paste or upload JD text
 2. Click **Start One Click**
-3. The app generates queries, runs SerpAPI, cleans/dedupes profile URLs, scrapes profiles with Apify, and scores fit + intent
+3. The app generates queries, runs SerpAPI, cleans/dedupes profile URLs, scrapes profiles with Apify, and scores fit
 4. It stops before Apollo
 5. Download the scored shortlist as CSV, XLSX, or JSON
 
@@ -124,7 +124,7 @@ All external calls happen in server routes; API keys are not returned to the bro
 
 ## Mock Mode
 
-Settings includes a Mock mode toggle for local debugging. Mock mode exercises edge cases such as foreign profiles with Indian names, `in.linkedin.com` URLs with foreign locations, missing locations, duplicate profiles, post-only intent evidence, Apify partial parses, Open to Work, layoffs, promotion/no-promotion examples, and Apollo not-found style data.
+Settings includes a Mock mode toggle for local debugging. Mock mode exercises edge cases such as foreign profiles with Indian names, `in.linkedin.com` URLs with foreign locations, missing locations, duplicate profiles, post-only supporting evidence, Apify partial parses, Open to Work, layoffs, promotion/no-promotion examples, and Apollo not-found style data.
 
 A non-mutating debug endpoint is available locally:
 
@@ -173,7 +173,7 @@ The actor ID remains configurable in Settings. The app also accepts the Apify ac
 
 The final recruiter sheet only uses `linkedin.com/in/...` profile URLs as candidate links.
 
-`linkedin.com/posts/...` results are stored as intent evidence sources. They are never used as the main candidate LinkedIn URL. If a post result cannot be connected to a visible author profile, it is marked `author_profile_missing` and remains a manual-review evidence item.
+`linkedin.com/posts/...` results are stored as supporting evidence sources. They are never used as the main candidate LinkedIn URL. If a post result cannot be connected to a visible author profile, it is marked `author_profile_missing` and remains a manual-review evidence item.
 
 ## India Location Filtering
 
@@ -209,7 +209,7 @@ Final recruiter sheet exports are available as:
 - XLSX
 - JSON
 
-Columns include candidate identity, LinkedIn URL, current/past experience, visibility factor, matched queries, fit and intent scores, tier, evidence, intent signals, Apollo contact status, manual notes, and outreach angle.
+Columns include candidate identity, LinkedIn URL, current/past experience, visibility factor, matched queries, fit score, tier, evidence, supporting movement signals, Apollo contact status, manual notes, and outreach angle.
 
 The Review step also has scored shortlist download buttons for CSV, XLSX, and JSON. This is useful while Apollo is paused.
 

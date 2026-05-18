@@ -7,6 +7,7 @@ export async function POST(request: Request) {
   const promptOverrides = {
     ...state.promptOverrides,
     queryGeneration: typeof body.queryGeneration === "string" ? body.queryGeneration : state.promptOverrides.queryGeneration,
+    profileFilters: typeof body.profileFilters === "string" ? body.profileFilters : state.promptOverrides.profileFilters,
     scoring: typeof body.scoring === "string" ? body.scoring : state.promptOverrides.scoring
   };
   const next = await patchState({ promptOverrides }, "Prompt overrides saved.");

@@ -234,17 +234,19 @@ ${promptOverride?.trim() ? `Recruiter-editable scoring instructions:\n${promptOv
 }
 
 Scoring:
-- Use the full JD/client brief below as the source of truth for fit. Compare the candidate against role requirements, must-haves, nice-to-haves, domain, location, seniority, exclusions, and intent language from the JD.
+- Score candidate fit out of 100. Use the full JD/client brief below as the source of truth for fit.
+- Create a role-specific rubric yourself from the JD and candidate evidence. Allocate points across the factors that matter for this role, for example title/seniority, current company relevance, past company/path relevance, actual location, domain/keywords, total experience, tenure, education, exclusions, and evidence certainty.
+- Do not use a fixed 70 fit + 30 intent split.
+- intent_score is kept only for backward compatibility. Set intent_score to 0 unless you need a small internal note, and do not add it to total_score.
+- total_score must equal the final fit score out of 100.
+- Open to Work, layoff, tenure, no-promotion, and hiring-comment signals are supporting confidence/context. They can improve prioritization when fit is already strong, but they must not rescue a weak fit.
 - SerpAPI snippets are weak evidence. Apify profile fields are stronger.
 - Actual profile location must come from structured/profile location when available.
 - Do not infer India from Indian names.
 - Do not infer India from "India" appearing in education/company/project text if candidate location is foreign or unknown.
 - If location is uncertain, mark unknown and add a manual check.
-- fit_score max 70. Consider current title/company, past company, actual location, education, keywords/domain, experience after profile parsing, exclusions.
-- intent_score max 30. Consider Open to Work, opportunity language, layoff/restructuring, 24-36 month tenure, 36+ month same-title stagnation, hiring comments.
 - Absence of Open to Work is neutral.
 - Do not remove or reject automatically.
-- If mode is ${mode}, keep unavailable sections conservative, not zero-punitive.
 - Tier thresholds are strict: Tier 1 total_score > 80, Tier 2 60-80, Tier 3 30-60, Tier 4 below 30.
 - Always rank/summarize candidates based on both match strength and evidence certainty.
 - Higher visibility_factor means the profile appeared across more selected queries and should increase confidence when the evidence is relevant.
@@ -258,10 +260,11 @@ Candidate:
 ${JSON.stringify(candidate)}
 `;
   const parsed = await openaiJson<Record<string, unknown>>(settings, prompt);
-  const total = Math.max(0, Math.min(100, Number(parsed.total_score ?? Number(parsed.fit_score ?? 0) + Number(parsed.intent_score ?? 0))));
+  const fit = Math.max(0, Math.min(100, Number(parsed.total_score ?? parsed.fit_score ?? 0)));
+  const total = fit;
   return {
     ...parsed,
-    fit_score: Math.max(0, Math.min(70, Number(parsed.fit_score ?? 0))),
+    fit_score: fit,
     intent_score: Math.max(0, Math.min(30, Number(parsed.intent_score ?? 0))),
     total_score: total,
     tier: asTier(parsed.tier, total),
