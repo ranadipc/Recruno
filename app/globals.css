@@ -130,6 +130,9 @@ td input, td select, td textarea { min-width: 112px; font-size: 13px; }
 .file-button { position: relative; overflow: hidden; }
 .file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .filters { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin: 12px 0; }
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.tabs button { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 7px 12px; cursor: pointer; text-transform: capitalize; }
+.tabs button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .filters label { min-width: 190px; }
 .final-tools { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: end; }
 .inline-check, .switch-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted); }

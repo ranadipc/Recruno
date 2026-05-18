@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { ApolloTierSelection, AppState, Candidate, PublicSettings, Query, QueryType, Tier, WorkflowSettings } from "@/lib/types";
+import type { ApolloTierSelection, AppState, Candidate, ProfileFilters, PublicSettings, Query, QueryType, Tier, WorkflowSettings } from "@/lib/types";
 import { DEFAULT_APOLLO_TIERS, DEFAULT_WORKFLOW } from "@/lib/defaults";
 
 const steps = [
@@ -11,12 +11,13 @@ const steps = [
   "SerpAPI Search",
   "Clean + Dedupe",
   "Apify Profiles",
+  "Profile Filters",
   "OpenAI Scoring",
   "Review + Download",
   "Apollo Enrichment",
   "Final Sheet"
 ];
-const queryTypes: QueryType[] = ["profile_location", "profile_domain", "profile_education", "profile_year", "career_path", "intent_post", "layoff_post", "hiring_comment"];
+const queryTypes: QueryType[] = ["profile_location", "profile_keyword", "profile_education", "career_path", "intent_post", "layoff_post", "hiring_comment"];
 const tiers: Tier[] = ["Tier 1", "Tier 2", "Tier 3", "Tier 4"];
 
 type Estimate = { email: number; phone: number; total: number; selected: number } | null;
@@ -25,9 +26,22 @@ function emptyState(): AppState {
   return {
     queries: [],
     serpResults: [],
+    rejectedSerpResults: [],
     candidates: [],
     rawSerpRuns: [],
     intentEvidenceSources: [],
+    profileFilters: {
+      actual_location_must_include: ["India", "Bangalore", "Bengaluru", "Mumbai"],
+      current_title_must_include: [],
+      current_company_must_include: [],
+      past_company_must_include: [],
+      keywords_must_include: [],
+      education_must_include: [],
+      require_open_to_work: false,
+      require_layoff_signal: false,
+      require_no_promotion_signal: false,
+      exclude_terms: []
+    },
     oneClick: {
       jd_text: "",
       queries: [],
@@ -113,10 +127,9 @@ export default function Home() {
     role_titles: "Product Manager, APM, Product Lead",
     current_companies: "Razorpay, PhonePe, CRED",
     past_companies: "McKinsey, BCG, Bain",
-    domains: "fintech, payments, UPI, lending",
+    keywords: "fintech, payments, UPI, lending",
     education: "IIT, IIM, BITS, ISB",
     locations: "Bangalore, Noida, Mumbai",
-    years: "2019, 2020, 2021",
     intent_terms: "open to work, looking for opportunities, exploring roles, laid off, impacted by layoffs",
     exclusions: "Founder, VP, Director, Recruiter, Intern, Student",
     jd_text: ""
@@ -129,8 +142,20 @@ export default function Home() {
     APOLLO_API_KEY: ""
   });
   const [workflow, setWorkflow] = useState<WorkflowSettings>(DEFAULT_WORKFLOW);
-  const [runSettings, setRunSettings] = useState({ pagesPerQuery: 2, startOffset: 0, maxSearches: 20, delayMs: 0, location: "India" });
+  const [runSettings, setRunSettings] = useState({ pagesPerQuery: 2, startOffset: 0, maxSearches: 20, delayMs: 0, location: "India", targetCountry: "India", strictIndiaOnly: true, keepUnknownLocation: false });
   const [scoreSettings, setScoreSettings] = useState({ maxCandidates: 50, onlyScraped: true });
+  const [profileFilterForm, setProfileFilterForm] = useState<ProfileFilters>({
+    actual_location_must_include: ["India", "Bangalore", "Bengaluru", "Mumbai"],
+    current_title_must_include: [],
+    current_company_must_include: [],
+    past_company_must_include: [],
+    keywords_must_include: [],
+    education_must_include: [],
+    require_open_to_work: false,
+    require_layoff_signal: false,
+    require_no_promotion_signal: false,
+    exclude_terms: []
+  });
   const [tierSelection, setTierSelection] = useState<ApolloTierSelection>(DEFAULT_APOLLO_TIERS);
   const [useAllNonRejected, setUseAllNonRejected] = useState(true);
   const [apolloEstimate, setApolloEstimate] = useState<Estimate>(null);
@@ -143,6 +168,7 @@ export default function Home() {
     setWorkflow(nextSettings.workflow);
     setSecretForm((form) => ({ ...form, APIFY_ACTOR_ID: nextSettings.apifyActorId }));
     setTierSelection(nextState.apolloTierSelection);
+    setProfileFilterForm(nextState.profileFilters);
     if (!keepStep) setActiveStep(Math.min(nextState.status.currentStep || 1, steps.length));
   }
 
@@ -199,7 +225,7 @@ export default function Home() {
   const tierCounts = Object.fromEntries(tiers.map((tier) => [tier, profileCandidates.filter((candidate) => (candidate.tier ?? "Tier 4") === tier).length])) as Record<Tier, number>;
   const foundEmails = profileCandidates.filter((candidate) => candidate.email).length;
   const foundPhones = profileCandidates.filter((candidate) => candidate.phone).length;
-  const isOneClick = activeStep === 11;
+  const isOneClick = activeStep === 12;
   const oneClickCandidates = state.oneClick.candidates.filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"));
 
   const selectedForApollo = useMemo(() => {
@@ -304,7 +330,7 @@ export default function Home() {
             );
           })}
           <div className="sidebar-divider" />
-          <button className={isOneClick ? "active one-click-nav" : "one-click-nav"} onClick={() => setActiveStep(11)}>
+          <button className={isOneClick ? "active one-click-nav" : "one-click-nav"} onClick={() => setActiveStep(12)}>
             <span>1</span>
             One Click
           </button>
@@ -320,6 +346,8 @@ export default function Home() {
           <div className="top-actions">
             <span className="mode real">Live API mode</span>
             <SmallButton onClick={() => refresh(true)}>Refresh</SmallButton>
+            <SmallButton onClick={() => runAction("Reload state from disk", () => api<AppState>("/api/state"))}>Reload state</SmallButton>
+            <SmallButton onClick={() => runAction("Reset running flags", () => api<AppState>("/api/state", { method: "POST", body: JSON.stringify({ resetRunningFlags: true }) }))}>Reset running</SmallButton>
             <SmallButton variant="danger" onClick={resetData}>Reset data</SmallButton>
           </div>
         </header>
@@ -373,6 +401,7 @@ export default function Home() {
                 <label><span>Apollo email reveal</span><select value={workflow.apolloEmailRevealEnabled ? "yes" : "no"} onChange={(event) => setWorkflow({ ...workflow, apolloEmailRevealEnabled: event.target.value === "yes" })}><option>yes</option><option>no</option></select></label>
                 <label><span>Apollo phone reveal</span><select value={workflow.apolloPhoneRevealEnabled ? "yes" : "no"} onChange={(event) => setWorkflow({ ...workflow, apolloPhoneRevealEnabled: event.target.value === "yes" })}><option>yes</option><option>no</option></select></label>
                 <label><span>Phone only selected tiers</span><select value={workflow.apolloPhoneRevealOnlySelectedTiers ? "yes" : "no"} onChange={(event) => setWorkflow({ ...workflow, apolloPhoneRevealOnlySelectedTiers: event.target.value === "yes" })}><option>yes</option><option>no</option></select></label>
+                <label><span>Mock mode</span><select value={workflow.mockMode ? "yes" : "no"} onChange={(event) => setWorkflow({ ...workflow, mockMode: event.target.value === "yes" })}><option>no</option><option>yes</option></select></label>
               </div>
             </details>
             <div className="actions">
@@ -389,10 +418,9 @@ export default function Home() {
               <Field label="Role/title keywords" value={briefForm.role_titles} onChange={(value) => setBriefForm({ ...briefForm, role_titles: value })} />
               <Field label="Current company keywords" value={briefForm.current_companies} onChange={(value) => setBriefForm({ ...briefForm, current_companies: value })} />
               <Field label="Past company / past experience" value={briefForm.past_companies} onChange={(value) => setBriefForm({ ...briefForm, past_companies: value })} />
-              <Field label="Domain keywords" value={briefForm.domains} onChange={(value) => setBriefForm({ ...briefForm, domains: value })} />
+              <Field label="Keywords" value={briefForm.keywords} onChange={(value) => setBriefForm({ ...briefForm, keywords: value })} placeholder="fintech, payments, HR, legal, AI, solar, EPC, AutoCAD" />
               <Field label="Education keywords" value={briefForm.education} onChange={(value) => setBriefForm({ ...briefForm, education: value })} />
               <Field label="Location keywords" value={briefForm.locations} onChange={(value) => setBriefForm({ ...briefForm, locations: value })} />
-              <Field label="Experience proxy years" value={briefForm.years} onChange={(value) => setBriefForm({ ...briefForm, years: value })} />
               <Field label="Intent keywords" value={briefForm.intent_terms} onChange={(value) => setBriefForm({ ...briefForm, intent_terms: value })} />
               <Field label="Exclusion keywords" value={briefForm.exclusions} onChange={(value) => setBriefForm({ ...briefForm, exclusions: value })} />
             </div>
@@ -426,10 +454,14 @@ export default function Home() {
               <label><span>Max searches</span><input type="number" value={runSettings.maxSearches} onChange={(event) => setRunSettings({ ...runSettings, maxSearches: Number(event.target.value) })} /></label>
               <label><span>Delay ms</span><input type="number" value={runSettings.delayMs} onChange={(event) => setRunSettings({ ...runSettings, delayMs: Number(event.target.value) })} /></label>
               <label><span>Search location</span><input value={runSettings.location} onChange={(event) => setRunSettings({ ...runSettings, location: event.target.value })} /></label>
+              <label><span>Target country</span><select value={runSettings.targetCountry} onChange={(event) => setRunSettings({ ...runSettings, targetCountry: event.target.value })}><option>India</option><option>Any</option></select></label>
+              <label className="switch-row"><input type="checkbox" checked={runSettings.strictIndiaOnly} onChange={(event) => setRunSettings({ ...runSettings, strictIndiaOnly: event.target.checked })} /> Strict India-only</label>
+              <label className="switch-row"><input type="checkbox" checked={runSettings.keepUnknownLocation} onChange={(event) => setRunSettings({ ...runSettings, keepUnknownLocation: event.target.checked })} /> Keep unknown location</label>
               <div className="estimate"><strong>{selectedQueries.length}</strong> queries x <strong>{runSettings.pagesPerQuery}</strong> pages = <strong>{selectedQueries.length * runSettings.pagesPerQuery}</strong> searches</div>
             </div>
             <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Run selected queries", () => api<AppState>("/api/serpapi/run", { method: "POST", body: JSON.stringify(runSettings) }))}>Run Selected Queries</SmallButton></div>
-            <div className="summary-cards"><Metric label="Organic results" value={state.serpResults.length} /><Metric label="Profile links" value={state.serpResults.filter((r) => /linkedin\.com\/in\//i.test(r.link)).length} /><Metric label="Post evidence" value={state.serpResults.filter((r) => /linkedin\.com\/posts\//i.test(r.link)).length} /></div>
+            <div className="summary-cards"><Metric label="Total results" value={state.serpResults.length} /><Metric label="Kept India profiles" value={state.serpResults.filter((r) => r.classification?.is_linkedin_profile && r.classification.keep_result && r.classification.location_status === "india").length} /><Metric label="Foreign rejected" value={state.serpResults.filter((r) => r.classification?.location_status === "foreign" && !r.classification.keep_result).length} /><Metric label="Unknown rejected" value={state.serpResults.filter((r) => r.classification?.location_status === "unknown" && !r.classification.keep_result).length} /><Metric label="Posts evidence" value={state.serpResults.filter((r) => r.classification?.is_linkedin_post).length} /></div>
+            <ResultReviewTabs results={state.serpResults} />
           </section>
         )}
 
@@ -437,7 +469,7 @@ export default function Home() {
           <section className="panel simple">
             <div className="section-heading"><h3>Clean into real candidates</h3><p>Only <code>linkedin.com/in</code> profile links become recruiter-sheet candidates. Posts stay as evidence only.</p></div>
             <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Clean data", () => api<AppState>("/api/candidates/clean", { method: "POST" }))}>Clean Data</SmallButton><a className="button secondary" href={downloadUrl("csv")}>Export CSV</a><a className="button secondary" href={downloadUrl("xlsx")}>Export XLSX</a><label className="button secondary file-button">Import CSV/XLSX<input type="file" accept=".csv,.xlsx" onChange={(event) => event.target.files?.[0] && handleImport(event.target.files[0])} /></label></div>
-            <div className="summary-cards"><Metric label="Profile candidates" value={profileCandidates.length} /><Metric label="Post evidence saved" value={state.intentEvidenceSources.length} /><Metric label="Missing post authors" value={state.intentEvidenceSources.filter((source) => source.source_status === "author_profile_missing").length} /></div>
+            <div className="summary-cards"><Metric label="Profile candidates" value={profileCandidates.length} /><Metric label="Post evidence saved" value={state.intentEvidenceSources.length} /><Metric label="Rejected results" value={state.rejectedSerpResults.length} /><Metric label="Missing post authors" value={state.intentEvidenceSources.filter((source) => source.source_status === "author_profile_missing").length} /></div>
             <CandidateEditor candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save candidates", saveCandidates)} />
           </section>
         )}
@@ -453,6 +485,31 @@ export default function Home() {
 
         {activeStep === 7 && (
           <section className="panel simple">
+            <div className="section-heading"><h3>Profile Filters</h3><p>Apply stricter filters on parsed Apify profile data. Profiles are labelled, not deleted.</p></div>
+            <div className="grid three settings-grid">
+              <FilterField label="Actual location must include" value={profileFilterForm.actual_location_must_include} onChange={(value) => setProfileFilterForm({ ...profileFilterForm, actual_location_must_include: value })} />
+              <FilterField label="Current title must include" value={profileFilterForm.current_title_must_include} onChange={(value) => setProfileFilterForm({ ...profileFilterForm, current_title_must_include: value })} />
+              <FilterField label="Current company must include" value={profileFilterForm.current_company_must_include} onChange={(value) => setProfileFilterForm({ ...profileFilterForm, current_company_must_include: value })} />
+              <FilterField label="Past company must include" value={profileFilterForm.past_company_must_include} onChange={(value) => setProfileFilterForm({ ...profileFilterForm, past_company_must_include: value })} />
+              <FilterField label="Keywords/profile text must include" value={profileFilterForm.keywords_must_include} onChange={(value) => setProfileFilterForm({ ...profileFilterForm, keywords_must_include: value })} />
+              <FilterField label="Education must include" value={profileFilterForm.education_must_include} onChange={(value) => setProfileFilterForm({ ...profileFilterForm, education_must_include: value })} />
+              <label><span>Min total exp years</span><input type="number" value={profileFilterForm.min_total_experience_years ?? ""} onChange={(event) => setProfileFilterForm({ ...profileFilterForm, min_total_experience_years: event.target.value ? Number(event.target.value) : undefined })} /></label>
+              <label><span>Max total exp years</span><input type="number" value={profileFilterForm.max_total_experience_years ?? ""} onChange={(event) => setProfileFilterForm({ ...profileFilterForm, max_total_experience_years: event.target.value ? Number(event.target.value) : undefined })} /></label>
+              <FilterField label="Exclude titles/companies/keywords" value={profileFilterForm.exclude_terms} onChange={(value) => setProfileFilterForm({ ...profileFilterForm, exclude_terms: value })} />
+            </div>
+            <div className="actions">
+              <label className="switch-row"><input type="checkbox" checked={profileFilterForm.require_open_to_work} onChange={(event) => setProfileFilterForm({ ...profileFilterForm, require_open_to_work: event.target.checked })} /> Require Open to Work</label>
+              <label className="switch-row"><input type="checkbox" checked={profileFilterForm.require_layoff_signal} onChange={(event) => setProfileFilterForm({ ...profileFilterForm, require_layoff_signal: event.target.checked })} /> Require layoff signal</label>
+              <label className="switch-row"><input type="checkbox" checked={profileFilterForm.require_no_promotion_signal} onChange={(event) => setProfileFilterForm({ ...profileFilterForm, require_no_promotion_signal: event.target.checked })} /> Require no-promotion signal</label>
+            </div>
+            <div className="summary-cards"><Metric label="Total parsed" value={profileCandidates.filter((c) => c.apify_status !== "pending_apify").length} /><Metric label="Passed" value={profileCandidates.filter((c) => c.passes_profile_filter).length} /><Metric label="Failed" value={profileCandidates.filter((c) => c.passes_profile_filter === false).length} /><Metric label="Location unknown" value={profileCandidates.filter((c) => c.actual_location_status === "unknown").length} /></div>
+            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Apply profile filters", () => api<AppState>("/api/profile-filters/run", { method: "POST", body: JSON.stringify(profileFilterForm) }))}>Apply Profile Filters</SmallButton></div>
+            <ProfileFilterTable candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save profile filter decisions", saveCandidates)} />
+          </section>
+        )}
+
+        {activeStep === 8 && (
+          <section className="panel simple">
             <div className="section-heading"><h3>Score fit and intent</h3><p>Scores rank candidates. They do not remove anyone automatically.</p></div>
             <div className="cost-panel">
               <div>
@@ -462,13 +519,13 @@ export default function Home() {
               <label><span>Max candidates</span><input type="number" min={1} value={scoreSettings.maxCandidates} onChange={(event) => setScoreSettings({ ...scoreSettings, maxCandidates: Number(event.target.value) })} /></label>
               <label className="switch-row"><input type="checkbox" checked={scoreSettings.onlyScraped} onChange={(event) => setScoreSettings({ ...scoreSettings, onlyScraped: event.target.checked })} /> scored scraped/partial only</label>
             </div>
-            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Fit + Intent", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit_intent", ...scoreSettings }) }))}>Fit + Intent</SmallButton><SmallButton onClick={() => runAction("Fit Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Fit Only</SmallButton><SmallButton onClick={() => runAction("Intent Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "intent", ...scoreSettings }) }))}>Intent Only</SmallButton><SmallButton onClick={() => setActiveStep(8)}>Skip</SmallButton></div>
+            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Fit + Intent", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit_intent", ...scoreSettings }) }))}>Fit + Intent</SmallButton><SmallButton onClick={() => runAction("Fit Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Fit Only</SmallButton><SmallButton onClick={() => runAction("Intent Only", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "intent", ...scoreSettings }) }))}>Intent Only</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
             <div className="summary-cards"><Metric label="Profiles" value={profileCandidates.length} /><Metric label="Scored" value={scoredCount} /><Metric label="Scraped/partial" value={apifySuccessCount + apifyPartialCount} /><Metric label="Default cap" value={scoreSettings.maxCandidates} /></div>
             <ScoredTable candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save scores", saveCandidates)} onEvidence={setEvidenceCandidate} />
           </section>
         )}
 
-        {activeStep === 8 && (
+        {activeStep === 9 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Human review gate</h3><p>Approve profiles before any Apollo spend. You can also download the scored shortlist here while Apollo is paused.</p></div>
             <div className="actions compact-actions"><a className="button primary" href={downloadUrl("xlsx")}>Download scored XLSX</a><a className="button secondary" href={downloadUrl("csv")}>Download scored CSV</a><a className="button secondary" href={downloadUrl("json")}>Download scored JSON</a></div>
@@ -477,7 +534,7 @@ export default function Home() {
           </section>
         )}
 
-        {activeStep === 9 && (
+        {activeStep === 10 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Apollo enrichment</h3><p>Paused for now. This remains available for later; Apollo is the only contact provider here.</p></div>
             <label className="switch-row"><input type="checkbox" checked={useAllNonRejected} onChange={(event) => setUseAllNonRejected(event.target.checked)} /> Use all non-rejected candidates for enrichment</label>
@@ -498,7 +555,7 @@ export default function Home() {
           </section>
         )}
 
-        {activeStep === 10 && (
+        {activeStep === 11 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Final recruiter sheet</h3><p>Only real LinkedIn profile URLs appear here. Post URLs are evidence-only in the drawer and export evidence column.</p></div>
             <div className="summary-cards"><Metric label="Total candidates" value={profileCandidates.length} /><Metric label="Tier 1" value={tierCounts["Tier 1"]} /><Metric label="Tier 2" value={tierCounts["Tier 2"]} /><Metric label="Emails found" value={foundEmails} /><Metric label="Phones found" value={foundPhones} /></div>
@@ -514,7 +571,7 @@ export default function Home() {
           </section>
         )}
 
-        {activeStep === 11 && (
+        {activeStep === 12 && (
           <section className="panel one-click-panel">
             <div className="one-click-hero">
               <div>
@@ -584,6 +641,7 @@ function helperCopy(step: number) {
     "Run selected searches through SerpAPI with visible pagination controls.",
     "Turn search results into clean LinkedIn profile candidates.",
     "Scrape visible profile details while preserving source evidence.",
+    "Filter on actual parsed profile fields before scoring.",
     "Score fit and intent using the brief and merged candidate data.",
     "Approve, reject, or annotate before contact enrichment.",
     "Estimate Apollo credits and enrich selected tiers.",
@@ -593,6 +651,33 @@ function helperCopy(step: number) {
 
 function Metric({ label, value }: { label: string; value: React.ReactNode }) {
   return <div className="metric-card"><strong>{value}</strong><span>{label}</span></div>;
+}
+
+function FilterField({ label, value, onChange }: { label: string; value: string[]; onChange: (value: string[]) => void }) {
+  return <label><span>{label}</span><input value={value.join(", ")} onChange={(event) => onChange(event.target.value.split(",").map((item) => item.trim()).filter(Boolean))} /></label>;
+}
+
+function ResultReviewTabs({ results }: { results: AppState["serpResults"] }) {
+  const [tab, setTab] = useState<"kept" | "rejected" | "unknown" | "posts">("kept");
+  const rows = results.filter((result) => {
+    if (tab === "kept") return result.classification?.keep_result && result.classification.is_linkedin_profile;
+    if (tab === "rejected") return result.classification && !result.classification.keep_result;
+    if (tab === "unknown") return result.classification?.location_status === "unknown";
+    return result.classification?.is_linkedin_post;
+  });
+  if (results.length === 0) return null;
+  return (
+    <details className="details-card">
+      <summary>Review SerpAPI classification</summary>
+      <div className="tabs">{(["kept", "rejected", "unknown", "posts"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Title</th><th>URL</th><th>Location</th><th>Status</th><th>Reason</th><th>Snippet</th></tr></thead>
+          <tbody>{rows.map((result) => <tr key={result.id}><td>{result.title}</td><td className="clip">{result.link}</td><td>{result.classification?.location_evidence.location_text || "missing"}</td><td><span className={badgeClass(result.classification?.location_status)}>{result.classification?.location_status}</span></td><td className="clip">{result.classification?.rejection_reason || "kept"}</td><td className="clip">{result.snippet}</td></tr>)}</tbody>
+        </table>
+      </div>
+    </details>
+  );
 }
 
 function ProgressBanner({ label, step, candidates, apifyDone, scored, messages }: { label: string; step: number; candidates: number; apifyDone: number; scored: number; messages: string[] }) {
@@ -682,6 +767,30 @@ function ApifyProfileTable({ candidates, onEvidence }: { candidates: Candidate[]
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function ProfileFilterTable({ candidates, updateCandidate, saveCandidates }: { candidates: Candidate[]; updateCandidate: (id: string, patch: Partial<Candidate>) => void; saveCandidates: () => void }) {
+  if (candidates.length === 0) return <div className="empty-state">No candidates to filter yet.</div>;
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Actual location</th><th>Filter</th><th>Reasons</th><th>Manual include</th><th>Visibility</th></tr></thead>
+        <tbody>
+          {candidates.map((candidate) => (
+            <tr key={candidate.id}>
+              <td>{displayName(candidate)}</td>
+              <td><span className={badgeClass(candidate.actual_location_status)}>{candidate.actual_location_status ?? "unknown"}</span><div className="subtle">{candidate.location_evidence || candidate.profile_data?.location || "No location evidence"}</div></td>
+              <td><span className={badgeClass(candidate.passes_profile_filter ? "approved" : "rejected")}>{candidate.passes_profile_filter ? "passes" : "fails"}</span></td>
+              <td className="clip">{candidate.filter_fail_reasons?.join("; ") || "No failures"}</td>
+              <td><label className="inline-check"><input type="checkbox" checked={Boolean(candidate.include_failed_profile_filter)} onChange={(event) => updateCandidate(candidate.id, { include_failed_profile_filter: event.target.checked })} /> include anyway</label></td>
+              <td><span className="badge neutral">Visibility: {candidate.visibility_factor}</span></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="actions"><SmallButton onClick={saveCandidates}>Save Filter Decisions</SmallButton></div>
     </div>
   );
 }

@@ -30,7 +30,9 @@ export async function getState(): Promise<AppState> {
   return {
     ...DEFAULT_STATE,
     ...state,
+    rejectedSerpResults: state.rejectedSerpResults ?? [],
     intentEvidenceSources: state.intentEvidenceSources ?? [],
+    profileFilters: { ...DEFAULT_STATE.profileFilters, ...(state.profileFilters ?? {}) },
     oneClick: { ...DEFAULT_STATE.oneClick, ...(state.oneClick ?? {}) },
     status: { ...DEFAULT_STATE.status, ...state.status },
     apolloTierSelection: { ...DEFAULT_STATE.apolloTierSelection, ...state.apolloTierSelection }

@@ -46,18 +46,27 @@ function asTier(value: unknown, total: number): Tier {
 }
 
 export async function generateQueries(settings: Settings, brief: Brief): Promise<Query[]> {
+  if (settings.workflow.mockMode) return mockQueries(brief);
   requireKey(settings.OPENAI_API_KEY, "OPENAI_API_KEY");
+  const indiaHelper = brief.locations.some((location) => /india/i.test(location))
+    ? `("India" OR "Bengaluru" OR "Bangalore" OR "Mumbai" OR "Delhi" OR "Noida" OR "Gurgaon" OR "Gurugram" OR "Pune" OR "Hyderabad")`
+    : "";
   const prompt = `
 Generate a LinkedIn X-ray query matrix for a recruiter sourcing workflow.
 Return only JSON with this shape:
-{"queries":[{"query_text":"string","query_type":"profile_location|profile_domain|profile_education|profile_year|career_path|intent_post|layoff_post|hiring_comment","expected_filters":["string"],"priority":1,"selected":true,"notes":"string"}]}
+{"queries":[{"query_text":"string","query_type":"profile_location|profile_keyword|profile_education|career_path|intent_post|layoff_post|hiring_comment","expected_filters":["string"],"priority":1,"selected":true,"notes":"string"}]}
 
 Rules:
 - Include master/high-precision queries.
-- Include subqueries using 3 hard filters plus 1 rotating filter and exclusions.
+- Hard filters: role/title + current company + past company.
+- Rotating filters: location, keywords, education, intent phrase, layoff phrase.
+- Do not use experience proxy years such as 2019, 2020, 2021 in any query.
 - Do not put every filter into one query.
 - Use site:linkedin.com/in for profile searches and site:linkedin.com/posts for intent or layoff posts.
 - Include exclusion keywords with Google negative quoted terms where useful.
+- Query groups should include title + current company + past company + location; title + current company + past company + keyword; title + current company + past company + education; title + keyword + intent phrase; layoff phrase + title + company/keyword; ex-BCG/former Bain/McKinsey alum career paths.
+- If India is requested, use this helper in some location queries: ${indiaHelper || "use only the provided city/location variants"}.
+- Query text only helps search. Actual location will be validated later from SerpAPI/Apify; do not over-trust query terms.
 
 Brief:
 ${JSON.stringify(brief, null, 2)}
@@ -76,21 +85,33 @@ ${JSON.stringify(brief, null, 2)}
 }
 
 export async function runSerpApiSearch(settings: Settings, query: Query, page: number, startOffset: number, location?: string) {
+  if (settings.workflow.mockMode) return mockSerpApi(query, page);
   const key = requireKey(settings.SERPAPI_API_KEY, "SERPAPI_API_KEY");
   const params = new URLSearchParams({
     engine: "google",
     q: query.query_text,
     api_key: key,
     start: String(startOffset),
-    num: String(settings.workflow.resultsPerPage || 10)
+    num: String(settings.workflow.resultsPerPage || 10),
+    google_domain: "google.co.in",
+    gl: "in",
+    hl: "en"
   });
-  if (location) params.set("location", location);
+  params.set("location", location || "India");
   const response = await fetch(`https://serpapi.com/search.json?${params.toString()}`);
   if (!response.ok) throw new Error(`SerpAPI failed on ${query.id} page ${page}: ${response.status} ${await response.text()}`);
   return response.json();
 }
 
 export async function runApify(settings: Settings, candidates: Candidate[], brief?: Brief) {
+  if (settings.workflow.mockMode) {
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    return candidates.map((candidate, index) => ({
+      candidate,
+      item: mockApifyItem(candidate, index),
+      status: (index % 7 === 0 ? "apify_partial" : "apify_success") as "apify_success" | "apify_partial"
+    }));
+  }
   const token = requireKey(settings.APIFY_API_TOKEN, "APIFY_API_TOKEN");
   const configuredActor = settings.APIFY_ACTOR_ID || "harvestapi/linkedin-profile-scraper";
   const actorId = configuredActor === "LpVuK3Zozwuipa5bp" ? configuredActor : configuredActor.replace("/", "~");
@@ -149,7 +170,7 @@ export async function runApify(settings: Settings, candidates: Candidate[], brie
       brief?.role_titles?.[0],
       brief?.current_companies?.[0],
       brief?.past_companies?.[0],
-      brief?.domains?.[0]
+      brief?.keywords?.[0] ?? brief?.domains?.[0]
     ]
       .filter(Boolean)
       .join(" ") || candidates.map((candidate) => candidate.name_guess).filter(Boolean).slice(0, 5).join(" OR ");
@@ -212,7 +233,12 @@ Analyze this LinkedIn sourcing candidate against the brief. Return only JSON:
 
 Scoring:
 - Use the full JD/client brief below as the source of truth for fit. Compare the candidate against role requirements, must-haves, nice-to-haves, domain, location, seniority, exclusions, and intent language from the JD.
-- fit_score max 70. Consider current title/company, past company, location, education, domain, experience proxy, exclusions.
+- SerpAPI snippets are weak evidence. Apify profile fields are stronger.
+- Actual profile location must come from structured/profile location when available.
+- Do not infer India from Indian names.
+- Do not infer India from "India" appearing in education/company/project text if candidate location is foreign or unknown.
+- If location is uncertain, mark unknown and add a manual check.
+- fit_score max 70. Consider current title/company, past company, actual location, education, keywords/domain, experience after profile parsing, exclusions.
 - intent_score max 30. Consider Open to Work, opportunity language, layoff/restructuring, 24-36 month tenure, 36+ month same-title stagnation, hiring comments.
 - Absence of Open to Work is neutral.
 - Do not remove or reject automatically.
@@ -314,4 +340,54 @@ export function makeApifySearchFallbackQuery(brief?: Brief) {
 export function summarizeEvidence(candidate: Candidate) {
   const text = candidateSearchText(candidate);
   return text.slice(0, 1200);
+}
+
+function mockQueries(brief: Brief): Query[] {
+  const title = brief.role_titles[0] ?? "Product Manager";
+  const company = brief.current_companies[0] ?? "Razorpay";
+  const past = brief.past_companies[0] ?? "BCG";
+  const keyword = brief.keywords[0] ?? "payments";
+  const location = brief.locations[0] ?? "Bangalore";
+  const texts = [
+    [`site:linkedin.com/in ${quote(title)} ${quote(company)} ${quote(past)} (${quote(location)} OR "Bengaluru")`, "profile_location"],
+    [`site:linkedin.com/in ${quote(title)} ${quote(company)} ${quote(past)} ${quote(keyword)}`, "profile_keyword"],
+    [`site:linkedin.com/in ${quote(title)} ${quote(company)} ${quote(past)} ("IIT" OR "IIM" OR "BITS" OR "ISB")`, "profile_education"],
+    [`site:linkedin.com/posts ("open to work" OR "looking for opportunities") ${quote(title)} ${quote(keyword)}`, "intent_post"],
+    [`site:linkedin.com/posts ("laid off" OR "impacted by layoffs") ${quote(title)} (${quote(company)} OR ${quote(keyword)})`, "layoff_post"],
+    [`site:linkedin.com/in ("ex-BCG" OR "former Bain" OR "McKinsey alum") ${quote(title)} ${quote(keyword)}`, "career_path"]
+  ] as Array<[string, Query["query_type"]]>;
+  return texts.map(([query_text, query_type], index) => ({ id: id("qry"), brief_id: brief.id, query_text, query_type, expected_filters: [query_type], priority: index + 1, selected: true, notes: "Mock query" }));
+}
+
+function mockSerpApi(query: Query, page: number) {
+  const base = [
+    { title: "Aarav Mehta on LinkedIn", link: "https://www.linkedin.com/in/aarav-mehta-pm", displayed_link: "linkedin.com/in/aarav-mehta-pm", snippet: "Product Manager at Razorpay · Location: Bengaluru, Karnataka, India · payments UPI", rich_snippet: { top: { extensions: ["Bengaluru, Karnataka, India"] } } },
+    { title: "Priya Sharma on LinkedIn", link: "https://www.linkedin.com/in/priya-sharma-growth", displayed_link: "linkedin.com/in/priya-sharma-growth", snippet: "Growth PM at PhonePe · Education: IIT Delhi · Location: Mumbai · open to work" },
+    { title: "Rohan Iyer on LinkedIn", link: "https://in.linkedin.com/in/rohan-iyer-london", displayed_link: "in.linkedin.com/in/rohan-iyer-london", snippet: "Indian fintech PM, built India payments projects · Location: London, England", rich_snippet: { top: { extensions: ["London, England, United Kingdom"] } } },
+    { title: "Neha Gupta on LinkedIn", link: "https://www.linkedin.com/in/neha-gupta-sf", displayed_link: "linkedin.com/in/neha-gupta-sf", snippet: "Product Lead at CRED · Education: ISB India · Location: San Francisco, United States", about_this_result: { source: { description: "Location: San Francisco, United States" } } },
+    { title: "Karan Malhotra on LinkedIn", link: "https://www.linkedin.com/in/karan-malhotra-unknown", displayed_link: "linkedin.com/in/karan-malhotra-unknown", snippet: "Product Manager at Razorpay · B2B SaaS · no visible location" },
+    { title: "Open to work post by unknown", link: "https://www.linkedin.com/posts/someone_open-to-work-product-manager-activity", displayed_link: "linkedin.com/posts/someone", snippet: "Open to work after layoffs. Product manager in fintech." },
+    { title: "LinkedIn Jobs", link: "https://www.linkedin.com/jobs/view/123", displayed_link: "linkedin.com/jobs", snippet: "Product Manager role in India" }
+  ];
+  return { organic_results: base.map((item, index) => ({ ...item, position: index + 1 + (page - 1) * 10 })) };
+}
+
+function mockApifyItem(candidate: Candidate, index: number) {
+  const foreign = /sf|london/i.test(candidate.normalized_linkedin_url) || index === 3;
+  const unknown = /unknown/i.test(candidate.normalized_linkedin_url);
+  return {
+    name: candidate.name_guess || `Mock Candidate ${index + 1}`,
+    headline: index % 4 === 0 ? "Open to Work - Product Manager, payments and fintech" : "Product Manager | fintech | payments",
+    about: index % 5 === 0 ? "Impacted by layoffs and exploring product roles." : "Built UPI, lending, and growth products.",
+    location: foreign ? "San Francisco, United States" : unknown ? "" : "Bengaluru, Karnataka, India",
+    currentTitle: index % 3 === 0 ? "Senior Product Manager" : "Product Manager",
+    currentCompany: candidate.company_guess || "Razorpay",
+    experience: [
+      { title: index % 3 === 0 ? "Senior Product Manager" : "Product Manager", company: candidate.company_guess || "Razorpay", startDate: index % 2 === 0 ? "2023-01" : undefined, location: foreign ? "San Francisco" : "Bengaluru" },
+      { title: "Associate Consultant", company: index % 2 === 0 ? "BCG" : "Bain", startDate: "2020-01", endDate: "2022-12" }
+    ],
+    education: [{ schoolName: "IIM Bangalore" }],
+    skills: ["Product Management", "UPI", "Fintech", "Growth"],
+    posts: index % 5 === 0 ? ["Open to work after restructuring"] : []
+  };
 }

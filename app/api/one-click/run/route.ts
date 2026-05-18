@@ -29,16 +29,16 @@ function briefFromText(jdText: string): Brief {
   const tokens = jdText.toLowerCase();
   const companies = ["Razorpay", "PhonePe", "CRED", "McKinsey", "BCG", "Bain"].filter((term) => tokens.includes(term.toLowerCase()));
   const locations = ["Bangalore", "Bengaluru", "Noida", "Mumbai", "Gurgaon", "Gurugram"].filter((term) => tokens.includes(term.toLowerCase()));
-  const domains = ["fintech", "payments", "UPI", "lending", "credit"].filter((term) => tokens.includes(term.toLowerCase()));
+  const keywords = ["fintech", "payments", "UPI", "lending", "credit", "HR", "legal", "AI", "B2B", "SaaS"].filter((term) => tokens.includes(term.toLowerCase()));
   const education = ["IIT", "IIM", "BITS", "ISB"].filter((term) => tokens.includes(term.toLowerCase()));
   const partial = {
     role_titles: splitTerms(tokens.includes("product") ? "Product Manager, Product Lead, APM" : "Product Manager"),
     current_companies: companies.filter((term) => !["McKinsey", "BCG", "Bain"].includes(term)),
     past_companies: companies.filter((term) => ["McKinsey", "BCG", "Bain"].includes(term)),
-    domains,
+    keywords,
+    domains: keywords,
     locations,
     education,
-    years: [],
     intent_terms: ["open to work", "looking for opportunities", "exploring roles", "laid off", "impacted by layoffs"],
     exclusions: ["Founder", "VP", "Director", "Recruiter", "Intern", "Student"],
     jd_text: jdText

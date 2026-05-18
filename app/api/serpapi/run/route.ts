@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { runSerpApiSearch } from "@/lib/external";
 import { getSettings, getState, patchState } from "@/lib/store";
 import type { SerpResult } from "@/lib/types";
-import { id } from "@/lib/utils";
+import { classifySerpResult, id } from "@/lib/utils";
 
 export async function POST(request: Request) {
   try {
@@ -13,6 +13,9 @@ export async function POST(request: Request) {
     const startPageOffset = Number(body.startOffset || 0);
     const maxSearches = Number(body.maxSearches || settings.workflow.maxQueriesPerRun * pages);
     const location = body.location ? String(body.location) : undefined;
+    const targetCountry = body.targetCountry === "Any" ? "Any" : "India";
+    const strictIndiaOnly = body.strictIndiaOnly !== false;
+    const keepUnknownLocation = body.keepUnknownLocation === true;
     const selected = state.queries.filter((query) => query.selected).slice(0, settings.workflow.maxQueriesPerRun);
     const limitedPairs = selected.flatMap((query) =>
       Array.from({ length: pages }, (_, index) => ({ query, page: index + 1, start: startPageOffset + index * 10 }))
@@ -25,7 +28,7 @@ export async function POST(request: Request) {
       rawSerpRuns.push({ id: id("raw"), query_id: pair.query.id, page: pair.page, response: json, created_at: new Date().toISOString() });
       const organic = Array.isArray(json.organic_results) ? json.organic_results : [];
       organic.forEach((item: Record<string, unknown>, index: number) => {
-        results.push({
+        const result: SerpResult = {
           id: id("serp"),
           query_id: pair.query.id,
           query_text: pair.query.query_text,
@@ -37,7 +40,9 @@ export async function POST(request: Request) {
           position: Number(item.position ?? index + 1),
           page: pair.page,
           raw_json: item
-        });
+        };
+        const classification = classifySerpResult(result, { targetCountry, strictIndiaOnly, keepUnknownLocation });
+        results.push({ ...result, classification, location_evidence: classification.location_evidence });
       });
       if (Number(body.delayMs ?? 0) > 0) await new Promise((resolve) => setTimeout(resolve, Number(body.delayMs)));
     }

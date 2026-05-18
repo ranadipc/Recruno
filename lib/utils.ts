@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Brief, Candidate, IntentEvidenceSource, QueryType, SerpResult, Tier } from "./types";
+import type { Brief, Candidate, IntentEvidenceSource, LocationEvidence, ProfileFilters, QueryType, SerpClassification, SerpResult, Tier } from "./types";
 
 export function id(prefix: string) {
   return `${prefix}_${randomUUID().slice(0, 8)}`;
@@ -29,6 +29,7 @@ export function buildExpansions(input: Partial<Brief>): Record<string, string[]>
     ...(input.locations ?? []),
     ...(input.past_companies ?? []),
     ...(input.current_companies ?? []),
+    ...(input.keywords ?? []),
     ...(input.domains ?? [])
   ];
   return terms.reduce<Record<string, string[]>>((acc, term) => {
@@ -75,6 +76,83 @@ export function isAllowedLinkedInResult(url: string, queryType?: QueryType) {
     return queryType === "intent_post" || queryType === "layoff_post" || queryType === "hiring_comment";
   }
   return normalized.includes("/in/");
+}
+
+const INDIA_TERMS = [
+  "india", "bengaluru", "bangalore", "mumbai", "delhi", "new delhi", "noida", "gurugram", "gurgaon",
+  "hyderabad", "pune", "chennai", "kolkata", "ahmedabad", "jaipur", "lucknow", "kanpur", "chandigarh",
+  "kochi", "indore", "surat", "nagpur", "coimbatore", "karnataka", "maharashtra", "telangana",
+  "tamil nadu", "uttar pradesh", "haryana", "gujarat", "rajasthan", "kerala", "west bengal"
+];
+
+const FOREIGN_TERMS = [
+  "united states", "usa", "u.s.", "canada", "united kingdom", "uk", "england", "london", "germany",
+  "berlin", "netherlands", "singapore", "dubai", "uae", "australia", "europe", "france", "san francisco",
+  "new york", "toronto", "sydney", "melbourne", "amsterdam", "paris", "dublin"
+];
+
+function hasAny(text: string, terms: string[]) {
+  const lower = text.toLowerCase();
+  return terms.some((term) => new RegExp(`(^|[^a-z])${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z]|$)`, "i").test(lower));
+}
+
+function pickLocationFromRaw(raw: unknown): LocationEvidence {
+  const item = (raw ?? {}) as Record<string, unknown>;
+  const rich = item.rich_snippet as Record<string, unknown> | undefined;
+  const top = rich?.top as Record<string, unknown> | undefined;
+  const extensions = top?.extensions;
+  if (Array.isArray(extensions)) {
+    const location = extensions.map(String).find((value) => hasAny(value, [...INDIA_TERMS, ...FOREIGN_TERMS]));
+    if (location) return classifyLocationText(location, "rich_snippet", "high");
+  }
+  const about = item.about_this_result as Record<string, unknown> | undefined;
+  const source = about?.source as Record<string, unknown> | undefined;
+  const description = String(source?.description ?? "");
+  const locationLine = description.match(/location\s*:\s*([^|.;\n]+)/i)?.[1] ?? description;
+  if (description && /location/i.test(description)) return classifyLocationText(locationLine, "about_description", "high");
+  const snippet = String(item.snippet ?? "");
+  const snippetLocation = snippet.match(/location\s*[:·-]\s*([^|.;\n]+)/i)?.[1];
+  if (snippetLocation) return classifyLocationText(snippetLocation, "snippet", "medium");
+  const link = String(item.link ?? "");
+  const displayed = String(item.displayed_link ?? "");
+  if (/\/\/in\.linkedin\.com|^in\.linkedin\.com/i.test(link) || /in\.linkedin\.com/i.test(displayed)) {
+    return { location_text: "in.linkedin.com", location_source: "weak_domain", is_india_location: "unknown", confidence: "low", rejection_reason: "Weak India domain hint only; actual profile location missing." };
+  }
+  return { location_text: "", location_source: "missing", is_india_location: "unknown", confidence: "low", rejection_reason: "No actual location evidence found." };
+}
+
+function classifyLocationText(text: string, source: LocationEvidence["location_source"], confidence: LocationEvidence["confidence"]): LocationEvidence {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (hasAny(clean, FOREIGN_TERMS)) {
+    return { location_text: clean, location_source: source, is_india_location: false, confidence, rejection_reason: "Actual location evidence appears foreign." };
+  }
+  if (hasAny(clean, INDIA_TERMS)) {
+    return { location_text: clean, location_source: source, is_india_location: true, confidence };
+  }
+  return { location_text: clean, location_source: source, is_india_location: "unknown", confidence: source === "snippet" ? "medium" : confidence, rejection_reason: "Location evidence does not clearly match India." };
+}
+
+export function extractLocationEvidence(result: Record<string, unknown>): LocationEvidence {
+  return pickLocationFromRaw(result);
+}
+
+export function classifySerpResult(result: SerpResult, options: { targetCountry: "India" | "Any"; strictIndiaOnly: boolean; keepUnknownLocation: boolean }): SerpClassification {
+  const normalized = normalizeLinkedInUrl(result.link);
+  const isProfile = Boolean(normalized?.startsWith("linkedin.com/in/"));
+  const isPost = Boolean(normalized?.startsWith("linkedin.com/posts/"));
+  const isCompanyOrJob = /linkedin\.com\/(company|jobs)\//i.test(result.link);
+  const location_evidence = extractLocationEvidence({ ...(result.raw_json as Record<string, unknown>), link: result.link, displayed_link: result.displayed_link, snippet: result.snippet });
+  const location_status = location_evidence.is_india_location === true ? "india" : location_evidence.is_india_location === false ? "foreign" : "unknown";
+  let keep_result = false;
+  let rejection_reason = "";
+  if (isCompanyOrJob) rejection_reason = "LinkedIn company/job page.";
+  else if (isPost) keep_result = true;
+  else if (!isProfile) rejection_reason = "Not a LinkedIn profile/post URL.";
+  else if (options.targetCountry === "Any" || !options.strictIndiaOnly) keep_result = true;
+  else if (location_status === "india") keep_result = true;
+  else if (location_status === "unknown" && options.keepUnknownLocation) keep_result = true;
+  else rejection_reason = location_status === "foreign" ? location_evidence.rejection_reason ?? "Foreign profile location." : "Unknown actual profile location.";
+  return { is_linkedin_profile: isProfile, is_linkedin_post: isPost, is_company_or_job: isCompanyOrJob, location_status, keep_result, rejection_reason, location_evidence };
 }
 
 export function cleanLinkedInName(value: string) {
@@ -134,10 +212,16 @@ export function tierFromScore(total: number): Tier {
   return "Tier 4";
 }
 
-export function cleanCandidateFromResults(results: SerpResult[]): { candidates: Candidate[]; intentEvidenceSources: IntentEvidenceSource[] } {
+export function cleanCandidateFromResults(results: SerpResult[]): { candidates: Candidate[]; intentEvidenceSources: IntentEvidenceSource[]; rejectedResults: SerpResult[]; duplicatesRemoved: number } {
   const bySlug = new Map<string, Candidate>();
   const postResults: SerpResult[] = [];
+  const rejectedResults: SerpResult[] = [];
+  let duplicatesRemoved = 0;
   for (const result of results) {
+    if (result.classification && !result.classification.keep_result) {
+      rejectedResults.push(result);
+      continue;
+    }
     if (isLinkedInPostUrl(result.link)) {
       postResults.push(result);
       continue;
@@ -148,6 +232,7 @@ export function cleanCandidateFromResults(results: SerpResult[]): { candidates: 
     const existing = bySlug.get(normalized);
     const guess = guessFromSerp(result.title, result.snippet);
     if (existing) {
+      duplicatesRemoved += 1;
       existing.original_urls = Array.from(new Set([...existing.original_urls, result.link]));
       existing.snippets = Array.from(new Set([...existing.snippets, result.snippet].filter(Boolean)));
       existing.matched_query_ids = Array.from(new Set([...existing.matched_query_ids, result.query_id]));
@@ -186,6 +271,13 @@ export function cleanCandidateFromResults(results: SerpResult[]): { candidates: 
       needs_contact_enrichment: true,
       apollo_status: "not_started"
     });
+    const created = bySlug.get(normalized);
+    if (created) {
+      created.actual_location_status = result.classification?.location_status;
+      created.location_evidence = result.classification?.location_evidence.location_text;
+      created.location_confidence = result.classification?.location_evidence.confidence;
+      created.location_source = result.classification?.location_evidence.location_source;
+    }
   }
 
   const candidates = Array.from(bySlug.values());
@@ -215,7 +307,54 @@ export function cleanCandidateFromResults(results: SerpResult[]): { candidates: 
     return source;
   });
 
-  return { candidates: candidates.sort((a, b) => b.visibility_factor - a.visibility_factor), intentEvidenceSources };
+  return { candidates: candidates.sort((a, b) => b.visibility_factor - a.visibility_factor), intentEvidenceSources, rejectedResults, duplicatesRemoved };
+}
+
+export function isActualIndiaProfile(candidate: Candidate) {
+  const profile = candidate.profile_data;
+  const location = String(profile?.location ?? profile?.current_company_location ?? "");
+  if (location) {
+    const classified = classifyLocationText(location, "rich_snippet", "high");
+    return {
+      status: classified.is_india_location === true ? "india" as const : classified.is_india_location === false ? "foreign" as const : "unknown" as const,
+      evidence: classified.location_text,
+      confidence: classified.confidence,
+      source: "apify_profile_location"
+    };
+  }
+  if (candidate.location_evidence && candidate.actual_location_status === "india") return { status: "india" as const, evidence: candidate.location_evidence, confidence: "medium" as const, source: "serpapi_location" };
+  return { status: "unknown" as const, evidence: "", confidence: "low" as const, source: "missing" };
+}
+
+export function applyProfileFilters(candidate: Candidate, filters: ProfileFilters): Candidate {
+  const actual = isActualIndiaProfile(candidate);
+  const text = candidateSearchText(candidate).toLowerCase();
+  const profile = candidate.profile_data;
+  const reasons: string[] = [];
+  const requireAny = (label: string, values: string[], haystack: string) => {
+    const terms = values.map((value) => value.toLowerCase()).filter(Boolean);
+    if (terms.length && !terms.some((term) => haystack.includes(term))) reasons.push(`${label} missing: ${values.join(", ")}`);
+  };
+  requireAny("Actual location", filters.actual_location_must_include, actual.evidence || profile?.location || "");
+  requireAny("Current title", filters.current_title_must_include, profile?.current_title || candidate.title_guess || "");
+  requireAny("Current company", filters.current_company_must_include, profile?.current_company || candidate.company_guess || "");
+  requireAny("Past company", filters.past_company_must_include, JSON.stringify(profile?.experience ?? profile?.past_companies ?? []));
+  requireAny("Keywords", filters.keywords_must_include, text);
+  requireAny("Education", filters.education_must_include, JSON.stringify(profile?.education ?? []));
+  if (filters.exclude_terms.some((term) => text.includes(term.toLowerCase()))) reasons.push(`Excluded term found: ${filters.exclude_terms.join(", ")}`);
+  if (filters.require_open_to_work && !/open to work|looking for opportunities|actively looking|exploring roles/i.test(text)) reasons.push("Open to Work signal missing");
+  if (filters.require_layoff_signal && !/laid off|impacted by layoffs|affected by layoffs|restructuring/i.test(text)) reasons.push("Layoff signal missing");
+  if (filters.require_no_promotion_signal && !/no promotion|same title|stagnat/i.test(text)) reasons.push("No-promotion signal missing or unverified");
+  return {
+    ...candidate,
+    actual_location_status: actual.status,
+    location_evidence: actual.evidence,
+    location_confidence: actual.confidence,
+    location_source: actual.source,
+    passes_profile_filter: reasons.length === 0,
+    filter_fail_reasons: reasons,
+    filter_confidence: actual.status === "unknown" ? "low" : "medium"
+  };
 }
 
 export function candidateSearchText(candidate: Candidate) {

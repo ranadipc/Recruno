@@ -16,6 +16,7 @@ export async function POST(request: Request) {
       .filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"))
       .filter((candidate) => !ids.size || ids.has(candidate.id))
       .filter((candidate) => !onlyScraped || candidate.apify_status === "apify_success" || candidate.apify_status === "apify_partial")
+      .filter((candidate) => candidate.passes_profile_filter !== false || candidate.include_failed_profile_filter)
       .sort((a, b) => b.visibility_factor - a.visibility_factor)
       .slice(0, maxCandidates);
     if (eligible.length === 0) return NextResponse.json({ error: "No candidates matched the scoring settings." }, { status: 400 });
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
 
     const updated = state.candidates.map((candidate) => analyzed.has(candidate.id) ? { ...candidate, ...analyzed.get(candidate.id)! } : candidate);
     const next = await patchState(
-      { candidates: updated, status: { currentStep: 8, errors: [] } as never },
+      { candidates: updated, status: { currentStep: 9, errors: [] } as never },
       `Fit and intent analysis completed for ${analyzed.size} candidates.`
     );
     return NextResponse.json(next);

@@ -101,7 +101,7 @@ export async function POST(request: Request) {
       }
     }
     const next = await patchState(
-      { candidates: updated, apolloTierSelection: selection, status: { currentStep: 10, errors: [] } as never },
+      { candidates: updated, apolloTierSelection: selection, status: { currentStep: 11, errors: [] } as never },
       `Apollo enrichment completed. Estimated credits: ${credit.total}.`
     );
     return NextResponse.json({ state: next, estimate: credit });

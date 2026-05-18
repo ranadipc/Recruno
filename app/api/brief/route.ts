@@ -9,10 +9,10 @@ export async function POST(request: Request) {
     role_titles: splitTerms(body.role_titles),
     current_companies: splitTerms(body.current_companies),
     past_companies: splitTerms(body.past_companies),
-    domains: splitTerms(body.domains),
+    keywords: splitTerms(body.keywords ?? body.domains),
+    domains: splitTerms(body.keywords ?? body.domains),
     locations: splitTerms(body.locations),
     education: splitTerms(body.education),
-    years: splitTerms(body.years),
     intent_terms: splitTerms(body.intent_terms),
     exclusions: splitTerms(body.exclusions),
     jd_text: String(body.jd_text ?? "")

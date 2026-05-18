@@ -12,12 +12,14 @@ The workflow is:
 4. OpenAI / ChatGPT query matrix generation
 5. Query review, editing, selection, and configurable pagination
 6. SerpAPI Google execution
-7. LinkedIn URL normalization and deduplication
-8. Apify profile extraction using `harvestapi/linkedin-profile-scraper`
-9. OpenAI / ChatGPT fit + intent analysis
-10. Manual recruiter review
-11. Apollo-only contact enrichment
-12. CSV, XLSX, and JSON recruiter sheet export
+7. Strict SerpAPI result classification for LinkedIn profile/post/job/company pages and India/foreign/unknown location evidence
+8. LinkedIn URL normalization and deduplication
+9. Apify profile extraction using `harvestapi/linkedin-profile-scraper`
+10. Profile Filters on parsed Apify data, including actual location, title, company, keywords, education, tenure, and intent flags
+11. OpenAI / ChatGPT fit + intent analysis
+12. Manual recruiter review
+13. Apollo-only contact enrichment
+14. CSV, XLSX, and JSON recruiter sheet export
 
 There is also a **One Click** mode in the sidebar. It is a separate fast lane:
 
@@ -120,6 +122,18 @@ The app now runs against real APIs only. If a required key is missing, the relev
 
 All external calls happen in server routes; API keys are not returned to the browser.
 
+## Mock Mode
+
+Settings includes a Mock mode toggle for local debugging. Mock mode exercises edge cases such as foreign profiles with Indian names, `in.linkedin.com` URLs with foreign locations, missing locations, duplicate profiles, post-only intent evidence, Apify partial parses, Open to Work, layoffs, promotion/no-promotion examples, and Apollo not-found style data.
+
+A non-mutating debug endpoint is available locally:
+
+```text
+GET /api/debug/trials
+```
+
+It runs the key India/foreign/unknown/post/deduplication trials without changing saved workflow state.
+
 ## Persistence
 
 The app stores workflow state in local JSON files under `data/`:
@@ -155,6 +169,23 @@ The actor ID remains configurable in Settings. The app also accepts the Apify ac
 The final recruiter sheet only uses `linkedin.com/in/...` profile URLs as candidate links.
 
 `linkedin.com/posts/...` results are stored as intent evidence sources. They are never used as the main candidate LinkedIn URL. If a post result cannot be connected to a visible author profile, it is marked `author_profile_missing` and remains a manual-review evidence item.
+
+## India Location Filtering
+
+SerpAPI still receives India-focused parameters (`google_domain=google.co.in`, `gl=in`, `location=India`, `hl=en`), but the app does not trust query text alone. Each organic result is classified using location evidence from:
+
+- `rich_snippet.top.extensions`
+- `about_this_result.source.description`
+- `snippet` location text
+- weak domain/displayed-link hints
+
+Default SerpAPI settings are:
+
+- Target country: India
+- Strict India-only: on
+- Keep unknown location: off
+
+Foreign profiles are rejected from the main candidate list by default. Unknown-location profiles are kept only if the UI toggle is enabled. After Apify, actual profile location is checked again from profile fields, and Apify location wins over weak SerpAPI snippet evidence.
 
 ## Apollo Credits
 

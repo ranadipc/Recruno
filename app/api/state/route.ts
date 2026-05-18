@@ -11,6 +11,9 @@ export async function POST(request: Request) {
   if (body.clearErrors) {
     return NextResponse.json(await patchState({ status: { errors: [] } as never }));
   }
+  if (body.resetRunningFlags) {
+    return NextResponse.json(await patchState({ status: { running: "idle", activeAction: "", errors: [] } as never }));
+  }
   return NextResponse.json(await getState());
 }
 

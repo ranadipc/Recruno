@@ -7,7 +7,8 @@ export const DEFAULT_WORKFLOW: WorkflowSettings = {
   maxProfilesToApify: 30,
   apolloEmailRevealEnabled: true,
   apolloPhoneRevealEnabled: true,
-  apolloPhoneRevealOnlySelectedTiers: true
+  apolloPhoneRevealOnlySelectedTiers: true,
+  mockMode: false
 };
 
 export const DEFAULT_APOLLO_TIERS: ApolloTierSelection = {
@@ -25,9 +26,22 @@ export const DEFAULT_SETTINGS: Settings = {
 export const DEFAULT_STATE: AppState = {
   queries: [],
   serpResults: [],
+  rejectedSerpResults: [],
   candidates: [],
   rawSerpRuns: [],
   intentEvidenceSources: [],
+  profileFilters: {
+    actual_location_must_include: ["India", "Bangalore", "Bengaluru", "Mumbai"],
+    current_title_must_include: [],
+    current_company_must_include: [],
+    past_company_must_include: [],
+    keywords_must_include: [],
+    education_must_include: [],
+    require_open_to_work: false,
+    require_layoff_signal: false,
+    require_no_promotion_signal: false,
+    exclude_terms: []
+  },
   oneClick: {
     jd_text: "",
     queries: [],
