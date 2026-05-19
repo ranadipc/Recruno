@@ -240,9 +240,21 @@ export default function Home() {
     return true;
   }
 
-  async function refresh(keepStep = false, options: { allowWeaker?: boolean } = {}) {
+  async function refresh(keepStep = false) {
     const [nextState, nextSettings, workflows] = await Promise.all([api<AppState>("/api/state"), api<PublicSettings>("/api/settings"), api<SavedWorkflow[]>("/api/workflows")]);
-    const accepted = commitState(nextState, { allowWeaker: options.allowWeaker, reason: "refresh" });
+    const currentWeight = workflowWeight(stateRef.current);
+    const nextWeight = workflowWeight(nextState);
+    if (currentWeight > 0 && nextWeight < currentWeight) {
+      if (process.env.NODE_ENV === "development") {
+        console.warn("[Recruno] Ignored weaker refresh snapshot", { currentWeight, nextWeight, currentCandidates: stateRef.current.candidates.length, nextCandidates: nextState.candidates.length });
+      }
+      setSavedWorkflows(workflows);
+      setSettings(nextSettings);
+      setWorkflow(nextSettings.workflow);
+      setHydrated(true);
+      return;
+    }
+    const accepted = commitState(nextState, { reason: "refresh" });
     if (!accepted) return;
     setSettings(nextSettings);
     setSavedWorkflows(workflows);
@@ -440,9 +452,15 @@ export default function Home() {
   }
 
   async function scrapeProfilesWithApify() {
-    const next = await api<AppState>("/api/apify/run", { method: "POST", body: JSON.stringify({ maxProfiles: workflow.maxProfilesToApify }) });
-    commitState(next, { allowWeaker: true, reason: "apify scrape" });
-    await refresh(true, { allowWeaker: true });
+    const next = await api<AppState>("/api/apify/run", {
+      method: "POST",
+      body: JSON.stringify({
+        maxProfiles: workflow.maxProfilesToApify,
+        candidates: profileCandidates
+      })
+    });
+    commitState(next, { reason: "apify scrape" });
+    await refresh(true);
   }
 
   return (

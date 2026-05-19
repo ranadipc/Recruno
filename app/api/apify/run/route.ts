@@ -33,7 +33,9 @@ export async function POST(request: Request) {
     const state = await getState();
     const selectedIds = new Set<string>(body.candidateIds ?? []);
     const max = Number(body.maxProfiles || settings.workflow.maxProfilesToApify);
-    const profileCandidates = state.candidates.filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"));
+    const requestCandidates = Array.isArray(body.candidates) ? body.candidates as Candidate[] : [];
+    const sourceCandidates = state.candidates.length > 0 ? state.candidates : requestCandidates;
+    const profileCandidates = sourceCandidates.filter((candidate) => candidate.normalized_linkedin_url?.startsWith("linkedin.com/in/"));
     const selected = profileCandidates
       .filter((candidate) => selectedIds.size === 0 || selectedIds.has(candidate.id))
       .sort((a, b) => {
@@ -44,7 +46,8 @@ export async function POST(request: Request) {
     if (selected.length === 0) return NextResponse.json({ error: "No LinkedIn profile candidates available for Apify. Clean SerpAPI data first." }, { status: 400 });
     const outputs = await runApify(settings, selected, state.brief);
     const byId = new Map(outputs.map((output) => [output.candidate.id, output]));
-    const candidates = state.candidates.map((candidate) => {
+    const currentCandidates = state.candidates.length > 0 ? state.candidates : sourceCandidates;
+    const candidates = currentCandidates.map((candidate) => {
       const output = byId.get(candidate.id);
       if (!output) return candidate;
       const item = output.item as Record<string, unknown> | undefined;
