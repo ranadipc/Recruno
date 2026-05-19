@@ -17,7 +17,7 @@ const steps = [
   "Apollo Enrichment",
   "Final Sheet"
 ];
-const queryTypes: QueryType[] = ["profile_location", "profile_keyword", "profile_education", "career_path", "intent_post", "layoff_post", "hiring_comment"];
+const queryTypes: QueryType[] = ["profile_location", "profile_keyword", "profile_education", "career_path"];
 const tiers: Tier[] = ["Tier 1", "Tier 2", "Tier 3", "Tier 4"];
 
 type Estimate = { email: number; phone: number; total: number; selected: number } | null;
@@ -174,10 +174,12 @@ function clearWorkflowBackup() {
 function defaultPromptOverride(kind: PromptKind) {
   if (kind === "queryGeneration") {
     return [
-      "Generate practical recruiter X-ray queries.",
-      "Prioritize high-signal title, current company, past company, location, keywords, education, and movement-signal combinations.",
+      "Generate at most 5 rich LinkedIn profile X-ray queries.",
+      "Strictly use only terms the recruiter entered in the brief. Do not add consulting firms, schools, companies, titles, or keywords that are not in the brief.",
+      "Do not generate hiring posts, layoff posts, hiring comments, or linkedin.com/posts queries.",
+      "Every query must include the most specific user-entered must-have keywords, especially exact company/brand phrases from the JD.",
       "Do not use experience proxy years in search queries.",
-      "Keep India-focused query helpers when India/Bangalore/Mumbai/etc. is requested."
+      "Keep location variants only for user-entered locations, for example Bangalore/Bengaluru and Gurgaon/Gurugram."
     ].join("\n");
   }
   if (kind === "profileFilters") {
@@ -218,16 +220,16 @@ export default function Home() {
   const [savedWorkflows, setSavedWorkflows] = useState<SavedWorkflow[]>([]);
   const [workflowName, setWorkflowName] = useState("PM workflow");
   const [oneClickText, setOneClickText] = useState("");
-  const [oneClickSettings, setOneClickSettings] = useState({ pagesPerQuery: 2, maxSearches: 20, maxCandidates: 50, location: "India" });
+  const [oneClickSettings, setOneClickSettings] = useState({ pagesPerQuery: 2, maxSearches: 100, maxCandidates: 50, location: "India" });
   const [briefForm, setBriefForm] = useState({
-    role_titles: "Product Manager, APM, Product Lead",
-    current_companies: "Razorpay, PhonePe, CRED",
-    past_companies: "McKinsey, BCG, Bain",
-    keywords: "fintech, payments, UPI, lending",
-    education: "IIT, IIM, BITS, ISB",
-    locations: "Bangalore, Noida, Mumbai",
-    intent_terms: "open to work, looking for opportunities, exploring roles, laid off, impacted by layoffs",
-    exclusions: "Founder, VP, Director, Recruiter, Intern, Student",
+    role_titles: "",
+    current_companies: "",
+    past_companies: "",
+    keywords: "",
+    education: "",
+    locations: "",
+    intent_terms: "",
+    exclusions: "",
     jd_text: ""
   });
   const [secretForm, setSecretForm] = useState({
@@ -238,10 +240,10 @@ export default function Home() {
     APOLLO_API_KEY: ""
   });
   const [workflow, setWorkflow] = useState<WorkflowSettings>(DEFAULT_WORKFLOW);
-  const [runSettings, setRunSettings] = useState({ pagesPerQuery: 2, startOffset: 0, maxSearches: 20, delayMs: 0, location: "India", targetCountry: "India", strictIndiaOnly: true, keepUnknownLocation: false });
+  const [runSettings, setRunSettings] = useState({ pagesPerQuery: 2, startOffset: 0, maxSearches: 100, delayMs: 0, location: "India", targetCountry: "India", strictIndiaOnly: true, keepUnknownLocation: true });
   const [scoreSettings, setScoreSettings] = useState({ maxCandidates: 50, onlyScraped: true });
   const [profileFilterForm, setProfileFilterForm] = useState<ProfileFilters>({
-    actual_location_must_include: ["India", "Bangalore", "Bengaluru", "Mumbai"],
+    actual_location_must_include: [],
     current_title_must_include: [],
     current_company_must_include: [],
     past_company_must_include: [],

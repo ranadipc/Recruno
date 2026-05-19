@@ -3,7 +3,7 @@ import type { ApolloTierSelection, AppState, Settings, WorkflowSettings } from "
 export const DEFAULT_WORKFLOW: WorkflowSettings = {
   defaultSerpPages: 2,
   resultsPerPage: 10,
-  maxQueriesPerRun: 10,
+  maxQueriesPerRun: 5,
   maxProfilesToApify: 30,
   apolloEmailRevealEnabled: true,
   apolloPhoneRevealEnabled: true,
@@ -31,7 +31,7 @@ export const DEFAULT_STATE: AppState = {
   rawSerpRuns: [],
   intentEvidenceSources: [],
   profileFilters: {
-    actual_location_must_include: ["India", "Bangalore", "Bengaluru", "Mumbai"],
+    actual_location_must_include: [],
     current_title_must_include: [],
     current_company_must_include: [],
     past_company_must_include: [],

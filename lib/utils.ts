@@ -170,6 +170,7 @@ export function classifySerpResult(result: SerpResult, options: { targetCountry:
   else if (location_status === "india") keep_result = true;
   else if (location_status === "unknown" && options.keepUnknownLocation) keep_result = true;
   else rejection_reason = location_status === "foreign" ? location_evidence.rejection_reason ?? "Foreign profile location." : "Unknown actual profile location.";
+  if (keep_result && location_status === "unknown") rejection_reason = "Shortlisted with unknown profile location. Verify manually or through Apify.";
   return { is_linkedin_profile: isProfile, is_linkedin_post: isPost, is_company_or_job: isCompanyOrJob, location_status, keep_result, rejection_reason, location_evidence };
 }
 

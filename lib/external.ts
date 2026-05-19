@@ -55,25 +55,31 @@ export async function generateQueries(settings: Settings, brief: Brief, promptOv
 Generate a LinkedIn X-ray query matrix for a recruiter sourcing workflow.
 ${promptOverride?.trim() ? `Recruiter-editable instructions:\n${promptOverride.trim()}\n` : ""}
 Return only JSON with this shape:
-{"queries":[{"query_text":"string","query_type":"profile_location|profile_keyword|profile_education|career_path|intent_post|layoff_post|hiring_comment","expected_filters":["string"],"priority":1,"selected":true,"notes":"string"}]}
+{"queries":[{"query_text":"string","query_type":"profile_location|profile_keyword|profile_education|career_path","expected_filters":["string"],"priority":1,"selected":true,"notes":"string"}]}
 
 Rules:
-- Include master/high-precision queries.
-- Hard filters: role/title + current company + past company.
-- Rotating filters: location, keywords, education, intent phrase, layoff phrase.
+- Generate no more than 5 queries total.
+- Generate only linkedin.com/in profile queries. Do not generate linkedin.com/posts, hiring post, layoff post, or hiring comment queries.
+- Allowed query_type values are only: profile_location, profile_keyword, profile_education, career_path.
+- Strictly use only terms provided by the recruiter in the brief. Do not add companies, consulting firms, colleges, technologies, titles, or keywords that are not present in role_titles, current_companies, past_companies, keywords, education, locations, exclusions, or jd_text.
+- If the brief contains a quoted/specific brand/company phrase such as "Finance veda", include that exact phrase in every high-precision query.
+- Include master/high-precision queries first.
+- Hard filters should be made from only the user-entered role/title, company/brand, keyword, and location fields that actually exist.
+- Rotating filters may use only user-entered location, keywords, or education.
 - Do not use experience proxy years such as 2019, 2020, 2021 in any query.
-- Do not put every filter into one query.
-- Use site:linkedin.com/in for profile searches and site:linkedin.com/posts for intent or layoff posts.
+- Do not invent ex-BCG, ex-McKinsey, IIT, IIM, fintech, etc. unless the recruiter explicitly entered those terms.
+- Use site:linkedin.com/in only.
 - Include exclusion keywords with Google negative quoted terms where useful.
-- Query groups should include title + current company + past company + location; title + current company + past company + keyword; title + current company + past company + education; title + keyword + intent phrase; layoff phrase + title + company/keyword; ex-BCG/former Bain/McKinsey alum career paths.
+- Good query groups are exact company/brand + location, exact company/brand + role, role + location + keyword, company/brand + keyword + education if education was provided.
 - If India is requested, use this helper in some location queries: ${indiaHelper || "use only the provided city/location variants"}.
+- For city variants, only expand user-entered locations: Bangalore/Bengaluru, Gurgaon/Gurugram, Mumbai/Bombay, Delhi/New Delhi.
 - Query text only helps search. Actual location will be validated later from SerpAPI/Apify; do not over-trust query terms.
 
 Brief:
 ${JSON.stringify(brief, null, 2)}
 `;
   const parsed = await openaiJson<{ queries: Omit<Query, "id" | "brief_id">[] }>(settings, prompt);
-  return (parsed.queries ?? []).map((query, index) => ({
+  return (parsed.queries ?? []).slice(0, 5).map((query, index) => ({
     id: id("qry"),
     brief_id: brief.id,
     selected: query.selected ?? true,
@@ -81,7 +87,7 @@ ${JSON.stringify(brief, null, 2)}
     notes: query.notes ?? "",
     expected_filters: query.expected_filters ?? [],
     query_text: query.query_text,
-    query_type: query.query_type
+    query_type: ["intent_post", "layoff_post", "hiring_comment"].includes(query.query_type) ? "profile_keyword" : query.query_type
   }));
 }
 

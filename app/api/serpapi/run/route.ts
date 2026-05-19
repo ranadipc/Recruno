@@ -4,6 +4,40 @@ import { getSettings, getState, patchState } from "@/lib/store";
 import type { SerpResult } from "@/lib/types";
 import { classifySerpResult, id } from "@/lib/utils";
 
+function requiredExactPhrases(query: string) {
+  const phrases: string[] = [];
+  const matches = query.matchAll(/"([^"]{2,})"/g);
+  for (const match of matches) {
+    const phrase = match[1].trim();
+    const before = query.slice(0, match.index);
+    const open = before.lastIndexOf("(");
+    const close = before.lastIndexOf(")");
+    const inOpenGroup = open > close;
+    const groupEnd = inOpenGroup ? query.indexOf(")", match.index) : -1;
+    const groupText = inOpenGroup && groupEnd > -1 ? query.slice(open, groupEnd + 1) : "";
+    const isOrAlternative = /\bOR\b/i.test(groupText);
+    const isNegative = /-\s*$/.test(before);
+    if (!isOrAlternative && !isNegative && !/^(jobs|hiring|recruiter)$/i.test(phrase)) phrases.push(phrase.toLowerCase());
+  }
+  return phrases;
+}
+
+function applyRequiredPhraseGate(result: SerpResult) {
+  const phrases = requiredExactPhrases(result.query_text);
+  if (phrases.length === 0 || !result.classification?.keep_result || !result.classification.is_linkedin_profile) return result;
+  const visible = [result.title, result.snippet, result.displayed_link, result.link].join(" ").toLowerCase();
+  const missing = phrases.filter((phrase) => !visible.includes(phrase));
+  if (missing.length === 0) return result;
+  return {
+    ...result,
+    classification: {
+      ...result.classification,
+      keep_result: false,
+      rejection_reason: `Missing required exact query phrase in visible result: ${missing.join(", ")}`
+    }
+  };
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -15,7 +49,7 @@ export async function POST(request: Request) {
     const location = body.location ? String(body.location) : undefined;
     const targetCountry = body.targetCountry === "Any" ? "Any" : "India";
     const strictIndiaOnly = body.strictIndiaOnly !== false;
-    const keepUnknownLocation = body.keepUnknownLocation === true;
+    const keepUnknownLocation = body.keepUnknownLocation !== false;
     const selected = state.queries.filter((query) => query.selected).slice(0, settings.workflow.maxQueriesPerRun);
     const limitedPairs = selected.flatMap((query) =>
       Array.from({ length: pages }, (_, index) => ({ query, page: index + 1, start: startPageOffset + index * 10 }))
@@ -42,7 +76,7 @@ export async function POST(request: Request) {
           raw_json: item
         };
         const classification = classifySerpResult(result, { targetCountry, strictIndiaOnly, keepUnknownLocation });
-        results.push({ ...result, classification, location_evidence: classification.location_evidence });
+        results.push(applyRequiredPhraseGate({ ...result, classification, location_evidence: classification.location_evidence }));
       });
       if (Number(body.delayMs ?? 0) > 0) await new Promise((resolve) => setTimeout(resolve, Number(body.delayMs)));
     }
