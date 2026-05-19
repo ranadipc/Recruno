@@ -240,9 +240,9 @@ export default function Home() {
     return true;
   }
 
-  async function refresh(keepStep = false) {
+  async function refresh(keepStep = false, options: { allowWeaker?: boolean } = {}) {
     const [nextState, nextSettings, workflows] = await Promise.all([api<AppState>("/api/state"), api<PublicSettings>("/api/settings"), api<SavedWorkflow[]>("/api/workflows")]);
-    const accepted = commitState(nextState, { reason: "refresh" });
+    const accepted = commitState(nextState, { allowWeaker: options.allowWeaker, reason: "refresh" });
     if (!accepted) return;
     setSettings(nextSettings);
     setSavedWorkflows(workflows);
@@ -282,7 +282,7 @@ export default function Home() {
     }
   }
 
-  async function runAction<T>(label: string, action: () => Promise<T>, after?: (value: T) => void) {
+  async function runAction<T>(label: string, action: () => Promise<T>, after?: (value: T) => void | Promise<void>) {
     if (busy) return;
     if (process.env.NODE_ENV === "development") console.log(`[Recruno] ${label} started`);
     busyRef.current = label;
@@ -290,7 +290,7 @@ export default function Home() {
     setNotice("");
     try {
       const result = await action();
-      after?.(result);
+      await after?.(result);
       if (!after && result && typeof result === "object" && "status" in result) commitState(result as unknown as AppState, { reason: label });
       setNotice(`${label} completed`);
       if (process.env.NODE_ENV === "development") console.log(`[Recruno] ${label} completed`);
@@ -437,6 +437,12 @@ export default function Home() {
 
   async function handleOneClickFile(file: File) {
     setOneClickText(await file.text());
+  }
+
+  async function scrapeProfilesWithApify() {
+    const next = await api<AppState>("/api/apify/run", { method: "POST", body: JSON.stringify({ maxProfiles: workflow.maxProfilesToApify }) });
+    commitState(next, { allowWeaker: true, reason: "apify scrape" });
+    await refresh(true, { allowWeaker: true });
   }
 
   return (
@@ -640,7 +646,7 @@ export default function Home() {
           <section className="panel simple">
             <div className="section-heading"><h3>Pull visible LinkedIn profile data</h3><p>Apify data enriches the existing SerpAPI evidence. Visibility and matched queries are preserved.</p></div>
             <div className="summary-cards"><Metric label="Candidates" value={profileCandidates.length} /><Metric label="Scraped" value={apifySuccessCount} /><Metric label="Partial" value={apifyPartialCount} /><Metric label="Run cap" value={workflow.maxProfilesToApify} /></div>
-            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Scrape profiles with Apify", () => api<AppState>("/api/apify/run", { method: "POST", body: JSON.stringify({ maxProfiles: workflow.maxProfilesToApify }) }))}>Scrape Profiles with Apify</SmallButton></div>
+            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Scrape profiles with Apify", scrapeProfilesWithApify)}>Scrape Profiles with Apify</SmallButton></div>
             <ApifyProfileTable candidates={profileCandidates} onEvidence={setEvidenceCandidate} />
           </section>
         )}

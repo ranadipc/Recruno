@@ -33,9 +33,15 @@ export async function POST(request: Request) {
     const state = await getState();
     const selectedIds = new Set<string>(body.candidateIds ?? []);
     const max = Number(body.maxProfiles || settings.workflow.maxProfilesToApify);
-    const selected = state.candidates
+    const profileCandidates = state.candidates.filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"));
+    const selected = profileCandidates
       .filter((candidate) => selectedIds.size === 0 || selectedIds.has(candidate.id))
+      .sort((a, b) => {
+        const statusRank = (status: string) => status === "pending_apify" ? 0 : status === "apify_partial" ? 1 : status === "apify_failed" ? 2 : 3;
+        return statusRank(a.apify_status) - statusRank(b.apify_status) || b.visibility_factor - a.visibility_factor;
+      })
       .slice(0, max);
+    if (selected.length === 0) return NextResponse.json({ error: "No LinkedIn profile candidates available for Apify. Clean SerpAPI data first." }, { status: 400 });
     const outputs = await runApify(settings, selected, state.brief);
     const byId = new Map(outputs.map((output) => [output.candidate.id, output]));
     const candidates = state.candidates.map((candidate) => {
@@ -44,10 +50,11 @@ export async function POST(request: Request) {
       const item = output.item as Record<string, unknown> | undefined;
       const profile = profileFromItem(item, candidate) ?? candidate.profile_data;
       const actual = isActualIndiaProfile({ ...candidate, profile_data: profile });
+      const status = item ? output.status : "apify_partial";
       return {
         ...candidate,
-        apify_status: output.status,
-        status: output.status,
+        apify_status: status,
+        status,
         apify_raw: item,
         profile_data: profile,
         actual_location_status: actual.status,
@@ -61,7 +68,7 @@ export async function POST(request: Request) {
     });
     const next = await patchState(
       { candidates, status: { currentStep: 7, errors: [] } as never },
-      `Apify profile step merged data for ${outputs.length} candidates.`
+      `Apify profile step merged data for ${outputs.length} candidates. ${outputs.filter((output) => output.item).length} had dataset rows.`
     );
     return NextResponse.json(next);
   } catch (error) {
