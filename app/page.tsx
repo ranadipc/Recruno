@@ -135,6 +135,19 @@ function workflowWeight(value: AppState) {
   ].reduce((sum, item) => sum + item, 0);
 }
 
+function workflowTime(value: AppState) {
+  return Date.parse(value.status?.lastUpdated ?? "") || 0;
+}
+
+function betterWorkflowState(a: AppState | null, b: AppState | null) {
+  if (!a) return b;
+  if (!b) return a;
+  const aWeight = workflowWeight(a);
+  const bWeight = workflowWeight(b);
+  if (aWeight !== bWeight) return aWeight > bWeight ? a : b;
+  return workflowTime(a) >= workflowTime(b) ? a : b;
+}
+
 function readWorkflowBackup() {
   if (typeof window === "undefined") return null;
   try {
@@ -271,20 +284,29 @@ export default function Home() {
 
   async function refresh(keepStep = false) {
     const [nextState, nextSettings, workflows] = await Promise.all([api<AppState>("/api/state"), api<PublicSettings>("/api/settings"), api<SavedWorkflow[]>("/api/workflows")]);
-    const currentWeight = workflowWeight(stateRef.current);
-    const nextWeight = workflowWeight(nextState);
-    if (currentWeight > 0 && nextWeight < currentWeight) {
+    const backup = readWorkflowBackup();
+    const localBest = betterWorkflowState(stateRef.current, backup);
+    const best = betterWorkflowState(nextState, localBest);
+    const shouldRestoreLocal = best !== nextState && workflowWeight(best ?? emptyState()) > workflowWeight(nextState);
+    const chosenState = best ?? nextState;
+    if (shouldRestoreLocal) {
       if (process.env.NODE_ENV === "development") {
-        console.warn("[Recruno] Ignored weaker refresh snapshot", { currentWeight, nextWeight, currentCandidates: stateRef.current.candidates.length, nextCandidates: nextState.candidates.length });
+        console.warn("[Recruno] Restoring stronger local workflow snapshot", {
+          serverWeight: workflowWeight(nextState),
+          localWeight: workflowWeight(chosenState),
+          serverCandidates: nextState.candidates.length,
+          localCandidates: chosenState.candidates.length
+        });
       }
+      commitState(chosenState, { allowWeaker: true, reason: "refresh local restore" });
       setSavedWorkflows(workflows);
       setSettings(nextSettings);
       setWorkflow(nextSettings.workflow);
-      await api<AppState>("/api/state", { method: "POST", body: JSON.stringify({ state: stateRef.current }) }).catch(() => stateRef.current);
+      await api<AppState>("/api/state", { method: "POST", body: JSON.stringify({ state: chosenState }) }).catch(() => chosenState);
       setHydrated(true);
       return;
     }
-    const accepted = commitState(nextState, { reason: "refresh" });
+    const accepted = commitState(chosenState, { reason: "refresh" });
     if (!accepted) return;
     setSettings(nextSettings);
     setSavedWorkflows(workflows);
@@ -297,12 +319,6 @@ export default function Home() {
   }
 
   useEffect(() => {
-    const backup = readWorkflowBackup();
-    if (backup && workflowWeight(backup) > 0) {
-      commitState(backup, { allowWeaker: true, reason: "browser backup" });
-      setActiveStep(Math.min(backup.status.currentStep || 1, steps.length));
-      api<AppState>("/api/state", { method: "POST", body: JSON.stringify({ state: backup }) }).catch(() => undefined);
-    }
     refresh().catch((error) => setNotice(error.message));
   }, []);
 
@@ -339,7 +355,7 @@ export default function Home() {
     try {
       const result = await action();
       await after?.(result);
-      if (!after && result && typeof result === "object" && "status" in result) commitState(result as unknown as AppState, { reason: label });
+      if (!after && result && typeof result === "object" && "status" in result) commitState(result as unknown as AppState, { allowWeaker: true, reason: label });
       setNotice(`${label} completed`);
       if (process.env.NODE_ENV === "development") console.log(`[Recruno] ${label} completed`);
     } catch (error) {
