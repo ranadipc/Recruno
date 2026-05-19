@@ -13,6 +13,24 @@ export function splitTerms(value: string | string[] | undefined): string[] {
     .filter(Boolean);
 }
 
+export function expandFilterTerms(values: string[]): string[] {
+  const expansions: Record<string, string[]> = {
+    bangalore: ["bangalore", "bengaluru"],
+    bengaluru: ["bangalore", "bengaluru"],
+    gurgaon: ["gurgaon", "gurugram"],
+    gurugram: ["gurgaon", "gurugram"],
+    bombay: ["bombay", "mumbai"],
+    mumbai: ["bombay", "mumbai"],
+    delhi: ["delhi", "new delhi"],
+    "new delhi": ["delhi", "new delhi"]
+  };
+  const expanded = values.flatMap((value) => {
+    const normalized = value.trim().toLowerCase();
+    return expansions[normalized] ?? [normalized];
+  });
+  return Array.from(new Set(expanded.filter(Boolean)));
+}
+
 export function buildExpansions(input: Partial<Brief>): Record<string, string[]> {
   const rules: Record<string, string[]> = {
     Bangalore: ["Bangalore", "Bengaluru"],
@@ -339,12 +357,12 @@ export function applyProfileFilters(candidate: Candidate, filters: ProfileFilter
   const profile = candidate.profile_data;
   const reasons: string[] = [];
   const requireAny = (label: string, values: string[], haystack: string) => {
-    const terms = values.map((value) => value.toLowerCase()).filter(Boolean);
+    const terms = expandFilterTerms(values);
     const searchable = haystack.toLowerCase();
     if (label === "Actual location" && actual.status === "india" && terms.some((term) => term === "india")) return;
     if (terms.length && !terms.some((term) => searchable.includes(term))) reasons.push(`${label} missing: ${values.join(", ")}`);
   };
-  requireAny("Actual location", filters.actual_location_must_include, actual.evidence || profile?.location || "");
+  requireAny("Actual location", filters.actual_location_must_include, [actual.evidence, profile?.location, text].filter(Boolean).join(" "));
   requireAny("Current title", filters.current_title_must_include, profile?.current_title || candidate.title_guess || "");
   requireAny("Current company", filters.current_company_must_include, profile?.current_company || candidate.company_guess || "");
   requireAny("Past company", filters.past_company_must_include, JSON.stringify(profile?.experience ?? profile?.past_companies ?? []));
@@ -376,7 +394,9 @@ export function candidateSearchText(candidate: Candidate) {
     candidate.profile_data?.location,
     candidate.snippets.join(" "),
     candidate.intent_evidence_sources?.map((source) => source.snippet).join(" "),
-    JSON.stringify(candidate.profile_data?.experience ?? [])
+    JSON.stringify(candidate.profile_data?.experience ?? []),
+    JSON.stringify(candidate.profile_data ?? {}),
+    JSON.stringify(candidate.apify_raw ?? {})
   ]
     .filter(Boolean)
     .join("\n");

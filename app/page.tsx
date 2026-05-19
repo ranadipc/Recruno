@@ -21,6 +21,7 @@ const queryTypes: QueryType[] = ["profile_location", "profile_keyword", "profile
 const tiers: Tier[] = ["Tier 1", "Tier 2", "Tier 3", "Tier 4"];
 
 type Estimate = { email: number; phone: number; total: number; selected: number } | null;
+const WORKFLOW_BACKUP_KEY = "recruno-automated-leads.workflow-state.v1";
 
 function emptyState(): AppState {
   return {
@@ -94,6 +95,10 @@ function badgeClass(value?: string) {
   return "badge neutral";
 }
 
+function apifyStatusLabel(status: Candidate["apify_status"]) {
+  return status === "apify_success" || status === "apify_partial" ? "apify_success" : status === "apify_failed" ? "apify_failed" : "pending_apify";
+}
+
 function SmallButton({ children, onClick, disabled, variant = "secondary" }: { children: React.ReactNode; onClick?: () => void; disabled?: boolean; variant?: "primary" | "secondary" | "danger" }) {
   return (
     <button className={`button ${variant}`} onClick={onClick} disabled={disabled}>
@@ -128,6 +133,29 @@ function workflowWeight(value: AppState) {
     value.intentEvidenceSources.length,
     value.oneClick?.candidates?.length ?? 0
   ].reduce((sum, item) => sum + item, 0);
+}
+
+function readWorkflowBackup() {
+  if (typeof window === "undefined") return null;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(WORKFLOW_BACKUP_KEY) || "null") as AppState | null;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeWorkflowBackup(value: AppState) {
+  if (typeof window === "undefined") return;
+  if (workflowWeight(value) <= 0) {
+    window.localStorage.removeItem(WORKFLOW_BACKUP_KEY);
+    return;
+  }
+  window.localStorage.setItem(WORKFLOW_BACKUP_KEY, JSON.stringify(value));
+}
+
+function clearWorkflowBackup() {
+  if (typeof window !== "undefined") window.localStorage.removeItem(WORKFLOW_BACKUP_KEY);
 }
 
 function defaultPromptOverride(kind: PromptKind) {
@@ -237,6 +265,7 @@ export default function Home() {
     }
     stateRef.current = nextState;
     setState(nextState);
+    writeWorkflowBackup(nextState);
     return true;
   }
 
@@ -251,6 +280,7 @@ export default function Home() {
       setSavedWorkflows(workflows);
       setSettings(nextSettings);
       setWorkflow(nextSettings.workflow);
+      await api<AppState>("/api/state", { method: "POST", body: JSON.stringify({ state: stateRef.current }) }).catch(() => stateRef.current);
       setHydrated(true);
       return;
     }
@@ -267,6 +297,12 @@ export default function Home() {
   }
 
   useEffect(() => {
+    const backup = readWorkflowBackup();
+    if (backup && workflowWeight(backup) > 0) {
+      commitState(backup, { allowWeaker: true, reason: "browser backup" });
+      setActiveStep(Math.min(backup.status.currentStep || 1, steps.length));
+      api<AppState>("/api/state", { method: "POST", body: JSON.stringify({ state: backup }) }).catch(() => undefined);
+    }
     refresh().catch((error) => setNotice(error.message));
   }, []);
 
@@ -317,8 +353,8 @@ export default function Home() {
 
   const profileCandidates = state.candidates.filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"));
   const selectedQueries = state.queries.filter((query) => query.selected);
-  const apifySuccessCount = profileCandidates.filter((c) => c.apify_status === "apify_success").length;
-  const apifyPartialCount = profileCandidates.filter((c) => c.apify_status === "apify_partial").length;
+  const apifySuccessCount = profileCandidates.filter((c) => c.apify_status === "apify_success" || c.apify_status === "apify_partial").length;
+  const apifyFailCount = profileCandidates.filter((c) => c.apify_status === "apify_failed").length;
   const scoredCount = profileCandidates.filter((c) => typeof c.total_score === "number").length;
   const approvedCount = profileCandidates.filter((candidate) => candidate.manual_status === "approved").length;
   const tierCounts = Object.fromEntries(tiers.map((tier) => [tier, profileCandidates.filter((candidate) => (candidate.tier ?? "Tier 4") === tier).length])) as Record<Tier, number>;
@@ -442,6 +478,7 @@ export default function Home() {
 
   async function resetData() {
     const next = await api<AppState>("/api/state", { method: "DELETE" });
+    clearWorkflowBackup();
     commitState(next, { allowWeaker: true, reason: "reset data" });
     setActiveStep(1);
     setNotice("Workflow data reset");
@@ -515,7 +552,7 @@ export default function Home() {
         {(notice || busy || state.status.errors.length > 0) && (
           <div className="toast">
             {!busy && <button className="toast-close" onClick={clearToast} aria-label="Dismiss notification">Dismiss</button>}
-            {busy && <ProgressBanner label={busy} step={activeStep} candidates={profileCandidates.length} apifyDone={apifySuccessCount + apifyPartialCount} scored={scoredCount} selectedQueries={selectedQueries.length} pagesPerQuery={runSettings.pagesPerQuery} />}
+            {busy && <ProgressBanner label={busy} step={activeStep} candidates={profileCandidates.length} apifyDone={apifySuccessCount} scored={scoredCount} selectedQueries={selectedQueries.length} pagesPerQuery={runSettings.pagesPerQuery} />}
             {notice && <p>{notice}</p>}
             {state.status.errors.map((error) => <p className="error" key={error}>{error}</p>)}
           </div>
@@ -663,7 +700,7 @@ export default function Home() {
         {activeStep === 6 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Pull visible LinkedIn profile data</h3><p>Apify data enriches the existing SerpAPI evidence. Visibility and matched queries are preserved.</p></div>
-            <div className="summary-cards"><Metric label="Candidates" value={profileCandidates.length} /><Metric label="Scraped" value={apifySuccessCount} /><Metric label="Partial" value={apifyPartialCount} /><Metric label="Run cap" value={workflow.maxProfilesToApify} /></div>
+            <div className="summary-cards"><Metric label="Candidates" value={profileCandidates.length} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Apify failed" value={apifyFailCount} /><Metric label="Run cap" value={workflow.maxProfilesToApify} /></div>
             <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Scrape profiles with Apify", scrapeProfilesWithApify)}>Scrape Profiles with Apify</SmallButton></div>
             <ApifyProfileTable candidates={profileCandidates} onEvidence={setEvidenceCandidate} />
           </section>
@@ -706,7 +743,7 @@ export default function Home() {
               <label className="switch-row"><input type="checkbox" checked={scoreSettings.onlyScraped} onChange={(event) => setScoreSettings({ ...scoreSettings, onlyScraped: event.target.checked })} /> prefer scraped/partial profiles</label>
             </div>
             <div className="actions"><SmallButton onClick={() => openPromptEditor("scoring")}>Edit Prompt</SmallButton><SmallButton variant="primary" onClick={() => runAction("Fit scoring", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Run Fit Score</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
-            <div className="summary-cards"><Metric label="Profiles" value={profileCandidates.length} /><Metric label="Scored" value={scoredCount} /><Metric label="Scraped/partial" value={apifySuccessCount + apifyPartialCount} /><Metric label="Default cap" value={scoreSettings.maxCandidates} /></div>
+            <div className="summary-cards"><Metric label="Profiles" value={profileCandidates.length} /><Metric label="Scored" value={scoredCount} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Default cap" value={scoreSettings.maxCandidates} /></div>
             <ScoredTable candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save scores", saveCandidates)} onEvidence={setEvidenceCandidate} />
           </section>
         )}
@@ -965,7 +1002,7 @@ function CandidateEditor({ candidates, updateCandidate, saveCandidates }: { cand
     <div className="table-wrap">
       <table>
         <thead><tr><th>Name</th><th>LinkedIn profile</th><th>Title</th><th>Company</th><th>Visibility</th><th>Status</th><th>Evidence notes</th><th /></tr></thead>
-        <tbody>{candidates.map((candidate) => <tr key={candidate.id}><td><input value={candidate.name_guess} onChange={(event) => updateCandidate(candidate.id, { name_guess: event.target.value })} /></td><td><a href={profileUrl(candidate)} target="_blank">{candidate.normalized_linkedin_url}</a></td><td><input value={candidate.title_guess} onChange={(event) => updateCandidate(candidate.id, { title_guess: event.target.value })} /></td><td><input value={candidate.company_guess} onChange={(event) => updateCandidate(candidate.id, { company_guess: event.target.value })} /></td><td><span className="badge neutral">Visibility: {candidate.visibility_factor}</span></td><td><span className={badgeClass(candidate.apify_status)}>{candidate.apify_status}</span></td><td className="clip">{candidate.snippets.join(" | ")}</td><td><SmallButton variant="danger" onClick={() => updateCandidate(candidate.id, { status: "deleted", manual_status: "rejected" })}>Reject</SmallButton></td></tr>)}</tbody>
+        <tbody>{candidates.map((candidate) => <tr key={candidate.id}><td><input value={candidate.name_guess} onChange={(event) => updateCandidate(candidate.id, { name_guess: event.target.value })} /></td><td><a href={profileUrl(candidate)} target="_blank">{candidate.normalized_linkedin_url}</a></td><td><input value={candidate.title_guess} onChange={(event) => updateCandidate(candidate.id, { title_guess: event.target.value })} /></td><td><input value={candidate.company_guess} onChange={(event) => updateCandidate(candidate.id, { company_guess: event.target.value })} /></td><td><span className="badge neutral">Visibility: {candidate.visibility_factor}</span></td><td><span className={badgeClass(apifyStatusLabel(candidate.apify_status))}>{apifyStatusLabel(candidate.apify_status)}</span></td><td className="clip">{candidate.snippets.join(" | ")}</td><td><SmallButton variant="danger" onClick={() => updateCandidate(candidate.id, { status: "deleted", manual_status: "rejected" })}>Reject</SmallButton></td></tr>)}</tbody>
       </table>
       <div className="actions"><SmallButton onClick={saveCandidates}>Save Candidate Edits</SmallButton></div>
     </div>
@@ -987,7 +1024,7 @@ function ApifyProfileTable({ candidates, onEvidence }: { candidates: Candidate[]
               <tr key={candidate.id}>
                 <td className="key-col">{displayName(candidate)}</td>
                 <td><a href={profileUrl(candidate)} target="_blank">{candidate.normalized_linkedin_url}</a></td>
-                <td><span className={badgeClass(candidate.apify_status)}>{candidate.apify_status}</span></td>
+                <td><span className={badgeClass(apifyStatusLabel(candidate.apify_status))}>{apifyStatusLabel(candidate.apify_status)}</span></td>
                 <td className="clip">{profile?.headline || candidate.title_guess || "No headline yet"}</td>
                 <td>{profile?.location || ""}</td>
                 <td>{profile?.current_title || candidate.title_guess}</td>
@@ -1149,7 +1186,7 @@ function ProfileSnapshot({ candidate }: { candidate: Candidate }) {
     ["Title", profile?.current_title || candidate.title_guess],
     ["Company", profile?.current_company || candidate.company_guess],
     ["Location", profile?.location || ""],
-    ["Apify", candidate.apify_status],
+    ["Apify", apifyStatusLabel(candidate.apify_status)],
     ["Visibility", candidate.visibility_factor]
   ];
   return (

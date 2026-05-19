@@ -53,7 +53,7 @@ export async function POST(request: Request) {
       const item = output.item as Record<string, unknown> | undefined;
       const profile = profileFromItem(item, candidate) ?? candidate.profile_data;
       const actual = isActualIndiaProfile({ ...candidate, profile_data: profile });
-      const status = item ? output.status : "apify_partial";
+      const status: Candidate["apify_status"] = item ? "apify_success" : "apify_failed";
       return {
         ...candidate,
         apify_status: status,
@@ -71,7 +71,7 @@ export async function POST(request: Request) {
     });
     const next = await patchState(
       { candidates, status: { currentStep: 7, errors: [] } as never },
-      `Apify profile step merged data for ${outputs.length} candidates. ${outputs.filter((output) => output.item).length} had dataset rows.`
+      `Apify profile step merged data for ${outputs.length} candidates. ${outputs.filter((output) => output.item).length} succeeded, ${outputs.filter((output) => !output.item).length} failed.`
     );
     return NextResponse.json(next);
   } catch (error) {
