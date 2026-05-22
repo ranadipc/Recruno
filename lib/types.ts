@@ -152,6 +152,7 @@ export type ProfileFilters = {
 
 export type PromptOverrides = {
   queryGeneration?: string;
+  cleanScreening?: string;
   profileFilters?: string;
   scoring?: string;
 };

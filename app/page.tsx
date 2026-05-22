@@ -124,7 +124,7 @@ function parseUiTerms(value: string) {
   return value.split(/[,;\n]/).map((item) => item.trim()).filter(Boolean);
 }
 
-type PromptKind = "queryGeneration" | "profileFilters" | "scoring";
+type PromptKind = "queryGeneration" | "cleanScreening" | "profileFilters" | "scoring";
 
 function workflowWeight(value: AppState) {
   return [
@@ -194,6 +194,16 @@ function defaultPromptOverride(kind: PromptKind) {
       "Experience, tenure, promotion, Open to Work, and layoff checks belong here after Apify parsing."
     ].join("\n");
   }
+  if (kind === "cleanScreening") {
+    return [
+      "Screen cleaned LinkedIn candidates before Apify.",
+      "Use the JD/brief and visible SERP evidence to reject obvious bad fits.",
+      "Reject wrong function, wrong seniority, excluded titles, unrelated education-only matches, and profiles that only matched a loose keyword.",
+      "If a candidate might fit but evidence is thin, mark review instead of reject.",
+      "Do not reject only because location is unknown.",
+      "Keep reasons short and practical for recruiters."
+    ].join("\n");
+  }
   return [
     "Rank candidates by surety of good match.",
     "Use visibility_factor as a confidence signal when the repeated matches are relevant.",
@@ -221,6 +231,7 @@ export default function Home() {
   const [evidenceCandidate, setEvidenceCandidate] = useState<Candidate | null>(null);
   const [promptEditor, setPromptEditor] = useState<PromptKind | null>(null);
   const [promptDraft, setPromptDraft] = useState("");
+  const [localPromptOverrides, setLocalPromptOverrides] = useState<Partial<Record<PromptKind, string>>>({});
   const [savedWorkflows, setSavedWorkflows] = useState<SavedWorkflow[]>([]);
   const [workflowName, setWorkflowName] = useState("PM workflow");
   const [oneClickText, setOneClickText] = useState("");
@@ -244,7 +255,7 @@ export default function Home() {
     APOLLO_API_KEY: ""
   });
   const [workflow, setWorkflow] = useState<WorkflowSettings>(DEFAULT_WORKFLOW);
-  const [runSettings, setRunSettings] = useState({ pagesPerQuery: 2, startOffset: 0, maxSearches: 100, delayMs: 0, location: "India", targetCountry: "India", strictIndiaOnly: true, keepUnknownLocation: true });
+  const [runSettings, setRunSettings] = useState({ pagesPerQuery: 2, startOffset: 0, delayMs: 0, location: "India", targetCountry: "India", strictIndiaOnly: true, keepUnknownLocation: true });
   const [scoreSettings, setScoreSettings] = useState({ maxCandidates: 50, onlyScraped: true });
   const [apifyBatchSize, setApifyBatchSize] = useState(DEFAULT_WORKFLOW.maxProfilesToApify);
   const [profileFilterForm, setProfileFilterForm] = useState<ProfileFilters>({
@@ -391,15 +402,14 @@ export default function Home() {
 
   function openPromptEditor(kind: PromptKind) {
     setPromptEditor(kind);
-    setPromptDraft(state.promptOverrides[kind] || defaultPromptOverride(kind));
+    setPromptDraft(localPromptOverrides[kind] || defaultPromptOverride(kind));
   }
 
-  async function savePromptOverride() {
+  function savePromptOverride() {
     if (!promptEditor) return;
-    const next = await api<AppState>("/api/prompts", { method: "POST", body: JSON.stringify({ [promptEditor]: promptDraft }) });
-    commitState(next, { reason: "save prompt" });
+    setLocalPromptOverrides((current) => ({ ...current, [promptEditor]: promptDraft }));
     setPromptEditor(null);
-    setNotice("Prompt saved");
+    setNotice("Prompt saved for this browser session only");
   }
 
   async function manualRefresh() {
@@ -610,7 +620,6 @@ export default function Home() {
               <div className="grid three settings-grid">
                 <label><span>Default SERP pages</span><select value={workflow.defaultSerpPages} onChange={(event) => setWorkflow({ ...workflow, defaultSerpPages: Number(event.target.value) as WorkflowSettings["defaultSerpPages"] })}>{[1, 2, 3, 5].map((n) => <option key={n}>{n}</option>)}</select></label>
                 <label><span>Results per page</span><input type="number" value={workflow.resultsPerPage} onChange={(event) => setWorkflow({ ...workflow, resultsPerPage: Number(event.target.value) })} /></label>
-                <label><span>Max queries per run</span><input type="number" value={workflow.maxQueriesPerRun} onChange={(event) => setWorkflow({ ...workflow, maxQueriesPerRun: Number(event.target.value) })} /></label>
                 <label><span>Max profiles to Apify</span><input type="number" value={workflow.maxProfilesToApify} onChange={(event) => setWorkflow({ ...workflow, maxProfilesToApify: Number(event.target.value) })} /></label>
                 <label><span>Apollo email reveal</span><select value={workflow.apolloEmailRevealEnabled ? "yes" : "no"} onChange={(event) => setWorkflow({ ...workflow, apolloEmailRevealEnabled: event.target.value === "yes" })}><option>yes</option><option>no</option></select></label>
                 <label><span>Apollo phone reveal</span><select value={workflow.apolloPhoneRevealEnabled ? "yes" : "no"} onChange={(event) => setWorkflow({ ...workflow, apolloPhoneRevealEnabled: event.target.value === "yes" })}><option>yes</option><option>no</option></select></label>
@@ -684,7 +693,7 @@ export default function Home() {
             <div className="section-heading"><h3>Generate and choose searches</h3><p>Precision searches find obvious matches. Recall searches catch people whose profiles miss one visible keyword.</p></div>
             <div className="summary-cards"><Metric label="Brief" value={state.brief ? "Saved" : "Missing"} /><Metric label="Queries" value={state.queries.length} /><Metric label="Selected" value={selectedQueries.length} /><Metric label="Estimated searches" value={selectedQueries.length * runSettings.pagesPerQuery} /></div>
             {!state.brief && <div className="empty-state">No brief saved yet. Go back one step and use Save Brief + Continue.</div>}
-            <div className="actions"><SmallButton onClick={() => openPromptEditor("queryGeneration")}>Edit Prompt</SmallButton><SmallButton variant="primary" disabled={!state.brief || Boolean(busy)} onClick={() => runAction("Generate query matrix", () => api<AppState>("/api/queries/generate", { method: "POST" }))}>Generate Query Matrix</SmallButton></div>
+            <div className="actions"><SmallButton onClick={() => openPromptEditor("queryGeneration")}>Edit Prompt</SmallButton><SmallButton variant="primary" disabled={!state.brief || Boolean(busy)} onClick={() => runAction("Generate query matrix", () => api<AppState>("/api/queries/generate", { method: "POST", body: JSON.stringify({ promptOverride: localPromptOverrides.queryGeneration }) }))}>Generate Query Matrix</SmallButton></div>
             {state.queries.length > 0 && (
               <details className="details-card" open>
                 <summary>Review query list</summary>
@@ -701,7 +710,6 @@ export default function Home() {
             <div className="run-settings">
               <label><span>Pages per query</span><select value={runSettings.pagesPerQuery} onChange={(event) => setRunSettings({ ...runSettings, pagesPerQuery: Number(event.target.value) })}>{[1, 2, 3, 5].map((n) => <option key={n}>{n}</option>)}</select></label>
               <label><span>Start offset</span><input type="number" value={runSettings.startOffset} onChange={(event) => setRunSettings({ ...runSettings, startOffset: Number(event.target.value) })} /></label>
-              <label><span>Max searches</span><input type="number" value={runSettings.maxSearches} onChange={(event) => setRunSettings({ ...runSettings, maxSearches: Number(event.target.value) })} /></label>
               <label><span>Delay ms</span><input type="number" value={runSettings.delayMs} onChange={(event) => setRunSettings({ ...runSettings, delayMs: Number(event.target.value) })} /></label>
               <label><span>Search location</span><input value={runSettings.location} onChange={(event) => setRunSettings({ ...runSettings, location: event.target.value })} /></label>
               <label><span>Target country</span><select value={runSettings.targetCountry} onChange={(event) => setRunSettings({ ...runSettings, targetCountry: event.target.value })}><option>India</option><option>Any</option></select></label>
@@ -718,7 +726,7 @@ export default function Home() {
         {activeStep === 5 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Clean into real candidates</h3><p>Only <code>linkedin.com/in</code> profile links become recruiter-sheet candidates. Posts stay as evidence only.</p></div>
-            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Clean data", () => api<AppState>("/api/candidates/clean", { method: "POST" }))}>Clean Data</SmallButton><a className="button secondary" href={downloadUrl("csv", true)}>Export CSV</a><a className="button secondary" href={downloadUrl("xlsx", true)}>Export XLSX</a><label className="button secondary file-button">Import CSV/XLSX<input type="file" accept=".csv,.xlsx" onChange={(event) => event.target.files?.[0] && handleImport(event.target.files[0])} /></label></div>
+            <div className="actions"><SmallButton onClick={() => openPromptEditor("cleanScreening")}>Edit Prompt</SmallButton><SmallButton variant="primary" onClick={() => runAction("Clean data", () => api<AppState>("/api/candidates/clean", { method: "POST", body: JSON.stringify({ promptOverride: localPromptOverrides.cleanScreening }) }))}>Clean Data</SmallButton><a className="button secondary" href={downloadUrl("csv", true)}>Export CSV</a><a className="button secondary" href={downloadUrl("xlsx", true)}>Export XLSX</a><label className="button secondary file-button">Import CSV/XLSX<input type="file" accept=".csv,.xlsx" onChange={(event) => event.target.files?.[0] && handleImport(event.target.files[0])} /></label></div>
             <div className="summary-cards"><Metric label="Total candidates" value={profileCandidates.length} /><Metric label="Rejected" value={rejectedProfileCount} /><Metric label="Shortlisted" value={shortlistedCandidates.length} /></div>
             <CandidateEditor candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save candidates", saveCandidates)} />
           </section>
@@ -760,7 +768,7 @@ export default function Home() {
               <label className="switch-row"><input type="checkbox" checked={profileFilterForm.require_no_promotion_signal} onChange={(event) => setProfileFilterForm({ ...profileFilterForm, require_no_promotion_signal: event.target.checked })} /> Require no-promotion signal</label>
             </div>
             <div className="summary-cards"><Metric label="Total parsed" value={shortlistedCandidates.filter((c) => c.apify_status !== "pending_apify").length} /><Metric label="Passed" value={shortlistedCandidates.filter((c) => c.passes_profile_filter).length} /><Metric label="Failed" value={shortlistedCandidates.filter((c) => c.passes_profile_filter === false).length} /><Metric label="Location unknown" value={shortlistedCandidates.filter((c) => c.actual_location_status === "unknown").length} /></div>
-            <div className="actions"><SmallButton onClick={() => openPromptEditor("profileFilters")}>Edit Filter Logic</SmallButton><SmallButton variant="primary" onClick={() => runAction("Apply profile filters", () => api<AppState>("/api/profile-filters/run", { method: "POST", body: JSON.stringify(profileFilterForm) }))}>Apply Profile Filters</SmallButton></div>
+            <div className="actions"><SmallButton onClick={() => openPromptEditor("profileFilters")}>Edit Filter Logic</SmallButton><SmallButton variant="primary" onClick={() => runAction("Apply profile filters", () => api<AppState>("/api/profile-filters/run", { method: "POST", body: JSON.stringify({ ...profileFilterForm, promptOverride: localPromptOverrides.profileFilters }) }))}>Apply Profile Filters</SmallButton></div>
             <ProfileFilterTable candidates={shortlistedCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save profile filter decisions", saveCandidates)} />
           </section>
         )}
@@ -776,7 +784,7 @@ export default function Home() {
               <label><span>Max candidates</span><input type="number" min={1} value={scoreSettings.maxCandidates} onChange={(event) => setScoreSettings({ ...scoreSettings, maxCandidates: Number(event.target.value) })} /></label>
               <label className="switch-row"><input type="checkbox" checked={scoreSettings.onlyScraped} onChange={(event) => setScoreSettings({ ...scoreSettings, onlyScraped: event.target.checked })} /> prefer scraped/partial profiles</label>
             </div>
-            <div className="actions"><SmallButton onClick={() => openPromptEditor("scoring")}>Edit Prompt</SmallButton><SmallButton variant="primary" onClick={() => runAction("Fit scoring", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Run Fit Score</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
+            <div className="actions"><SmallButton onClick={() => openPromptEditor("scoring")}>Edit Prompt</SmallButton><SmallButton variant="primary" onClick={() => runAction("Fit scoring", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings, promptOverride: localPromptOverrides.scoring }) }))}>Run Fit Score</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
             <div className="summary-cards"><Metric label="Profiles" value={shortlistedCandidates.length} /><Metric label="Scored" value={scoredCount} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Default cap" value={scoreSettings.maxCandidates} /></div>
             <ScoredTable candidates={shortlistedCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save scores", saveCandidates)} onEvidence={setEvidenceCandidate} />
           </section>
@@ -885,7 +893,7 @@ export default function Home() {
         {!isOneClick && <StepFooter activeStep={activeStep} setActiveStep={setActiveStep} maxStep={steps.length} busy={Boolean(busy)} />}
 
         {evidenceCandidate && <EvidenceDrawer candidate={evidenceCandidate} onClose={() => setEvidenceCandidate(null)} />}
-        {promptEditor && <PromptModal kind={promptEditor} value={promptDraft} onChange={setPromptDraft} onSave={() => runAction("Save prompt", savePromptOverride)} onClose={() => setPromptEditor(null)} />}
+        {promptEditor && <PromptModal kind={promptEditor} value={promptDraft} onChange={setPromptDraft} onSave={savePromptOverride} onClose={() => setPromptEditor(null)} />}
       </section>
     </main>
   );
@@ -1306,21 +1314,21 @@ function EvidenceSection({ title, items }: { title: string; items: string[] }) {
 }
 
 function PromptModal({ kind, value, onChange, onSave, onClose }: { kind: PromptKind; value: string; onChange: (value: string) => void; onSave: () => void; onClose: () => void }) {
-  const title = kind === "queryGeneration" ? "Query Generation" : kind === "profileFilters" ? "Profile Filter Logic" : "Fit Scoring";
+  const title = kind === "queryGeneration" ? "Query Generation" : kind === "cleanScreening" ? "Clean Data AI Screen" : kind === "profileFilters" ? "Profile Filter Logic" : "Fit Scoring";
   return (
     <div className="drawer-backdrop" onClick={onClose}>
       <aside className="prompt-modal" onClick={(event) => event.stopPropagation()}>
         <div className="drawer-head">
           <div>
             <h3>Edit {title}</h3>
-            <p>The app still adds the required schema and candidate/JD context server-side.</p>
+            <p>This edit is local to this browser session. The app still adds the required schema and candidate/JD context server-side.</p>
           </div>
           <SmallButton onClick={onClose}>Close</SmallButton>
         </div>
         <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={14} />
         <div className="actions">
           <SmallButton onClick={() => onChange(defaultPromptOverride(kind))}>Reset Draft</SmallButton>
-          <SmallButton variant="primary" onClick={onSave}>Save Prompt</SmallButton>
+          <SmallButton variant="primary" onClick={onSave}>Use Prompt Locally</SmallButton>
         </div>
       </aside>
     </div>

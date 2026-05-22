@@ -15,7 +15,8 @@ function deterministicRejectReason(candidate: Candidate, exclusions: string[]) {
   return matched ? `Excluded term found: ${matched}` : "";
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => ({}));
   const settings = await getSettings();
   const state = await getState();
   const cleaned = cleanCandidateFromResults(state.serpResults);
@@ -36,7 +37,7 @@ export async function POST() {
     raw_source_flags: candidate.raw_source_flags,
     serp_evidence: candidate.serp_evidence
   }));
-  const aiDecisions = await screenCandidatesAgainstBrief(settings, state.brief, baseCandidates).catch(() => new Map());
+  const aiDecisions = await screenCandidatesAgainstBrief(settings, state.brief, baseCandidates, typeof body.promptOverride === "string" ? body.promptOverride : undefined).catch(() => new Map());
   const exclusions = state.brief?.exclusions ?? [];
   const candidates = baseCandidates.map((candidate) => {
     const deterministicReason = deterministicRejectReason(candidate, exclusions);

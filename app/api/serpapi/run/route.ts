@@ -45,19 +45,18 @@ export async function POST(request: Request) {
     const state = await getState();
     const pages = Number(body.pagesPerQuery || settings.workflow.defaultSerpPages || 2);
     const startPageOffset = Number(body.startOffset || 0);
-    const maxSearches = Number(body.maxSearches || settings.workflow.maxQueriesPerRun * pages);
     const location = body.location ? String(body.location) : undefined;
     const targetCountry = body.targetCountry === "Any" ? "Any" : "India";
     const strictIndiaOnly = body.strictIndiaOnly !== false;
     const keepUnknownLocation = body.keepUnknownLocation !== false;
-    const selected = state.queries.filter((query) => query.selected).slice(0, settings.workflow.maxQueriesPerRun);
-    const limitedPairs = selected.flatMap((query) =>
+    const selected = state.queries.filter((query) => query.selected);
+    const searchPairs = selected.flatMap((query) =>
       Array.from({ length: pages }, (_, index) => ({ query, page: index + 1, start: startPageOffset + index * 10 }))
-    ).slice(0, maxSearches);
+    );
 
     const results: SerpResult[] = [];
     const rawSerpRuns = [];
-    for (const pair of limitedPairs) {
+    for (const pair of searchPairs) {
       const json = await runSerpApiSearch(settings, pair.query, pair.page, pair.start, location);
       rawSerpRuns.push({ id: id("raw"), query_id: pair.query.id, page: pair.page, response: json, created_at: new Date().toISOString() });
       const organic = Array.isArray(json.organic_results) ? json.organic_results : [];

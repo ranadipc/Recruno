@@ -47,7 +47,7 @@ export async function POST(request: Request) {
       while (cursor < eligible.length) {
         const candidate = eligible[cursor];
         cursor += 1;
-        const analysis = await analyzeCandidate(settings, brief, candidate, mode, state.promptOverrides.scoring);
+        const analysis = await analyzeCandidate(settings, brief, candidate, mode, typeof body.promptOverride === "string" ? body.promptOverride : undefined);
         analyzed.set(candidate.id, analysis);
       }
     }));

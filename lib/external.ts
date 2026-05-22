@@ -291,13 +291,14 @@ ${JSON.stringify(candidate)}
   };
 }
 
-export async function screenCandidatesAgainstBrief(settings: Settings, brief: Brief | undefined, candidates: Candidate[]) {
+export async function screenCandidatesAgainstBrief(settings: Settings, brief: Brief | undefined, candidates: Candidate[], promptOverride?: string) {
   if (!brief || candidates.length === 0 || !settings.OPENAI_API_KEY) return new Map<string, { decision: "keep" | "reject" | "review"; reason: string }>();
   const decisions = new Map<string, { decision: "keep" | "reject" | "review"; reason: string }>();
   const chunks = Array.from({ length: Math.ceil(candidates.length / 40) }, (_, index) => candidates.slice(index * 40, index * 40 + 40));
   for (const chunk of chunks) {
     const prompt = `
 You are screening LinkedIn search-result candidates before Apify scraping.
+${promptOverride?.trim() ? `Recruiter-editable clean-screen instructions:\n${promptOverride.trim()}\n` : ""}
 Return JSON only:
 {"decisions":[{"id":"candidate id","decision":"keep|reject|review","reason":"short reason"}]}
 
