@@ -40,7 +40,7 @@ export async function POST(request: Request) {
     const profileCandidates = sourceCandidates.filter((candidate) => candidate.normalized_linkedin_url?.startsWith("linkedin.com/in/"));
     const selected = profileCandidates
       .filter((candidate) => selectedIds.size === 0 || selectedIds.has(candidate.id))
-      .filter((candidate) => includeRejected || candidate.manual_status !== "rejected")
+      .filter((candidate) => includeRejected || (candidate.manual_status !== "rejected" && candidate.status !== "ai_rejected" && candidate.status !== "deleted"))
       .filter((candidate) => selectedIds.size > 0 || candidate.apify_status === "pending_apify")
       .sort((a, b) => {
         const statusRank = (status: string) => status === "pending_apify" ? 0 : status === "apify_partial" ? 1 : status === "apify_failed" ? 2 : 3;

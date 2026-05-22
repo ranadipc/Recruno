@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { patchState } from "@/lib/store";
+import { getState, saveState } from "@/lib/store";
+import { DEFAULT_STATE } from "@/lib/defaults";
 import type { Brief } from "@/lib/types";
 import { buildExpansions, id, splitTerms } from "@/lib/utils";
 
@@ -23,6 +24,18 @@ export async function POST(request: Request) {
     expansions: buildExpansions(partial),
     created_at: body.created_at ?? new Date().toISOString()
   };
-  const state = await patchState({ brief, status: { currentStep: 3 } as never }, "Brief saved and expansions prepared.");
+  const previous = await getState();
+  const state = await saveState({
+    ...DEFAULT_STATE,
+    brief,
+    promptOverrides: previous.promptOverrides,
+    apolloTierSelection: previous.apolloTierSelection,
+    status: {
+      ...DEFAULT_STATE.status,
+      currentStep: 3,
+      messages: ["Brief saved. Previous workflow data cleared for this new JD."],
+      errors: []
+    }
+  });
   return NextResponse.json(state);
 }

@@ -34,7 +34,7 @@ export async function POST(request: Request) {
     const baseCandidates = state.candidates
       .filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"))
       .filter((candidate) => !ids.size || ids.has(candidate.id))
-      .filter((candidate) => candidate.manual_status !== "rejected");
+      .filter((candidate) => candidate.manual_status !== "rejected" && candidate.status !== "ai_rejected" && candidate.status !== "deleted");
     const scrapedCandidates = baseCandidates.filter((candidate) => candidate.apify_status === "apify_success" || candidate.apify_status === "apify_partial");
     const preferred = onlyScraped && scrapedCandidates.length > 0 ? scrapedCandidates : baseCandidates;
     const eligible = preferred.sort((a, b) => b.visibility_factor - a.visibility_factor).slice(0, maxCandidates);

@@ -3,13 +3,14 @@ import ExcelJS from "exceljs";
 import { getState } from "@/lib/store";
 import { csvEscape, recruiterRows } from "@/lib/sheet";
 
-function rowsFromState() {
-  return getState().then((state) => recruiterRows(state.candidates));
+function rowsFromState(includeRejected: boolean) {
+  return getState().then((state) => recruiterRows(state.candidates, { includeRejected }));
 }
 
-export async function GET(_request: Request, context: { params: Promise<{ format: string }> }) {
+export async function GET(request: Request, context: { params: Promise<{ format: string }> }) {
   const { format } = await context.params;
-  const rows = await rowsFromState();
+  const includeRejected = new URL(request.url).searchParams.get("includeRejected") === "1";
+  const rows = await rowsFromState(includeRejected);
   if (format === "json") {
     return new NextResponse(JSON.stringify(rows, null, 2), {
       headers: { "Content-Type": "application/json", "Content-Disposition": "attachment; filename=recruno-final-sheet.json" }

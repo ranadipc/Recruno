@@ -70,8 +70,8 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   return json as T;
 }
 
-function downloadUrl(format: "csv" | "xlsx" | "json") {
-  return `/api/export/${format}`;
+function downloadUrl(format: "csv" | "xlsx" | "json", includeRejected = false) {
+  return `/api/export/${format}${includeRejected ? "?includeRejected=1" : ""}`;
 }
 
 function oneClickDownloadUrl(format: "csv" | "xlsx" | "json") {
@@ -88,7 +88,7 @@ function profileUrl(candidate: Candidate) {
 
 function badgeClass(value?: string) {
   if (!value) return "badge neutral";
-  if (/tier 1|found|enriched|approved|success|visible/i.test(value)) return "badge good";
+  if (/tier 1|found|enriched|approved|success|visible|passed/i.test(value)) return "badge good";
   if (/tier 2|pending|partial/i.test(value)) return "badge info";
   if (/tier 3|missing|not_requested|skipped|manual/i.test(value)) return "badge warn";
   if (/tier 4|failed|rejected|risk|not_found/i.test(value)) return "badge bad";
@@ -97,6 +97,10 @@ function badgeClass(value?: string) {
 
 function apifyStatusLabel(status: Candidate["apify_status"]) {
   return status === "apify_success" || status === "apify_partial" ? "apify_success" : status === "apify_failed" ? "apify_failed" : "pending_apify";
+}
+
+function isRejectedCandidate(candidate: Candidate) {
+  return candidate.manual_status === "rejected" || candidate.status === "ai_rejected" || candidate.status === "deleted";
 }
 
 function SmallButton({ children, onClick, disabled, variant = "secondary" }: { children: React.ReactNode; onClick?: () => void; disabled?: boolean; variant?: "primary" | "secondary" | "danger" }) {
@@ -371,15 +375,17 @@ export default function Home() {
   }
 
   const profileCandidates = state.candidates.filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"));
+  const rejectedProfileCount = profileCandidates.filter(isRejectedCandidate).length;
+  const shortlistedCandidates = profileCandidates.filter((candidate) => !isRejectedCandidate(candidate));
   const selectedQueries = state.queries.filter((query) => query.selected);
-  const apifySuccessCount = profileCandidates.filter((c) => c.apify_status === "apify_success" || c.apify_status === "apify_partial").length;
-  const apifyFailCount = profileCandidates.filter((c) => c.apify_status === "apify_failed").length;
-  const apifyPendingCount = profileCandidates.filter((c) => c.apify_status === "pending_apify" && c.manual_status !== "rejected").length;
-  const scoredCount = profileCandidates.filter((c) => typeof c.total_score === "number").length;
-  const approvedCount = profileCandidates.filter((candidate) => candidate.manual_status === "approved").length;
-  const tierCounts = Object.fromEntries(tiers.map((tier) => [tier, profileCandidates.filter((candidate) => (candidate.tier ?? "Tier 4") === tier).length])) as Record<Tier, number>;
-  const foundEmails = profileCandidates.filter((candidate) => candidate.email).length;
-  const foundPhones = profileCandidates.filter((candidate) => candidate.phone).length;
+  const apifySuccessCount = shortlistedCandidates.filter((c) => c.apify_status === "apify_success" || c.apify_status === "apify_partial").length;
+  const apifyFailCount = shortlistedCandidates.filter((c) => c.apify_status === "apify_failed").length;
+  const apifyPendingCount = shortlistedCandidates.filter((c) => c.apify_status === "pending_apify").length;
+  const scoredCount = shortlistedCandidates.filter((c) => typeof c.total_score === "number").length;
+  const approvedCount = shortlistedCandidates.filter((candidate) => candidate.manual_status === "approved").length;
+  const tierCounts = Object.fromEntries(tiers.map((tier) => [tier, shortlistedCandidates.filter((candidate) => (candidate.tier ?? "Tier 4") === tier).length])) as Record<Tier, number>;
+  const foundEmails = shortlistedCandidates.filter((candidate) => candidate.email).length;
+  const foundPhones = shortlistedCandidates.filter((candidate) => candidate.phone).length;
   const isOneClick = activeStep === 12;
   const oneClickCandidates = state.oneClick.candidates.filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"));
 
@@ -403,13 +409,13 @@ export default function Home() {
   }
 
   const selectedForApollo = useMemo(() => {
-    return profileCandidates.filter((candidate) => {
+    return shortlistedCandidates.filter((candidate) => {
       if (!candidate.needs_contact_enrichment) return false;
       if (useAllNonRejected ? candidate.manual_status === "rejected" : candidate.manual_status !== "approved") return false;
       const pick = tierSelection[(candidate.tier ?? "Tier 4") as Tier];
       return Boolean(pick?.email || pick?.phone);
     });
-  }, [profileCandidates, tierSelection, useAllNonRejected]);
+  }, [shortlistedCandidates, tierSelection, useAllNonRejected]);
 
   const liveEstimate = useMemo(() => {
     const estimate = selectedForApollo.reduce(
@@ -427,7 +433,7 @@ export default function Home() {
 
   const finalRows = useMemo(() => {
     const search = finalFilter.search.toLowerCase().trim();
-    return profileCandidates
+    return shortlistedCandidates
       .filter((candidate) => finalFilter.tier === "all" || candidate.tier === finalFilter.tier)
       .filter((candidate) => {
         if (finalFilter.contact === "all") return true;
@@ -441,7 +447,7 @@ export default function Home() {
         return [displayName(candidate), candidate.profile_data?.current_company, candidate.company_guess, candidate.profile_data?.current_title, candidate.title_guess].join(" ").toLowerCase().includes(search);
       })
       .sort((a, b) => Number(b.total_score ?? 0) - Number(a.total_score ?? 0) || b.visibility_factor - a.visibility_factor);
-  }, [profileCandidates, finalFilter]);
+  }, [shortlistedCandidates, finalFilter]);
 
   function updateQuery(index: number, patch: Partial<Query>) {
     const queries = [...state.queries];
@@ -465,7 +471,7 @@ export default function Home() {
 
   async function saveBriefAndContinue() {
     await runAction("Save brief", () => api<AppState>("/api/brief", { method: "POST", body: JSON.stringify(briefForm) }), (next) => {
-      commitState(next, { reason: "save brief" });
+      commitState(next, { allowWeaker: true, reason: "save brief" });
       setActiveStep(3);
     });
   }
@@ -514,7 +520,7 @@ export default function Home() {
       body: JSON.stringify({
         maxProfiles: apifyBatchSize,
         runAll,
-        candidates: profileCandidates
+        candidates: shortlistedCandidates
       })
     });
     commitState(next, { reason: "apify scrape" });
@@ -573,7 +579,7 @@ export default function Home() {
         {(notice || busy || state.status.errors.length > 0) && (
           <div className="toast">
             {!busy && <button className="toast-close" onClick={clearToast} aria-label="Dismiss notification">Dismiss</button>}
-            {busy && <ProgressBanner label={busy} step={activeStep} candidates={profileCandidates.length} apifyDone={apifySuccessCount} scored={scoredCount} selectedQueries={selectedQueries.length} pagesPerQuery={runSettings.pagesPerQuery} />}
+            {busy && <ProgressBanner label={busy} step={activeStep} candidates={shortlistedCandidates.length} apifyDone={apifySuccessCount} scored={scoredCount} selectedQueries={selectedQueries.length} pagesPerQuery={runSettings.pagesPerQuery} />}
             {notice && <p>{notice}</p>}
             {state.status.errors.map((error) => <p className="error" key={error}>{error}</p>)}
           </div>
@@ -712,8 +718,8 @@ export default function Home() {
         {activeStep === 5 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Clean into real candidates</h3><p>Only <code>linkedin.com/in</code> profile links become recruiter-sheet candidates. Posts stay as evidence only.</p></div>
-            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Clean data", () => api<AppState>("/api/candidates/clean", { method: "POST" }))}>Clean Data</SmallButton><a className="button secondary" href={downloadUrl("csv")}>Export CSV</a><a className="button secondary" href={downloadUrl("xlsx")}>Export XLSX</a><label className="button secondary file-button">Import CSV/XLSX<input type="file" accept=".csv,.xlsx" onChange={(event) => event.target.files?.[0] && handleImport(event.target.files[0])} /></label></div>
-            <div className="summary-cards"><Metric label="Profile candidates" value={profileCandidates.length} /><Metric label="Post evidence saved" value={state.intentEvidenceSources.length} /><Metric label="Rejected results" value={state.rejectedSerpResults.length} /><Metric label="Missing post authors" value={state.intentEvidenceSources.filter((source) => source.source_status === "author_profile_missing").length} /></div>
+            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Clean data", () => api<AppState>("/api/candidates/clean", { method: "POST" }))}>Clean Data</SmallButton><a className="button secondary" href={downloadUrl("csv", true)}>Export CSV</a><a className="button secondary" href={downloadUrl("xlsx", true)}>Export XLSX</a><label className="button secondary file-button">Import CSV/XLSX<input type="file" accept=".csv,.xlsx" onChange={(event) => event.target.files?.[0] && handleImport(event.target.files[0])} /></label></div>
+            <div className="summary-cards"><Metric label="Total candidates" value={profileCandidates.length} /><Metric label="Rejected" value={rejectedProfileCount} /><Metric label="Shortlisted" value={shortlistedCandidates.length} /></div>
             <CandidateEditor candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save candidates", saveCandidates)} />
           </section>
         )}
@@ -721,7 +727,7 @@ export default function Home() {
         {activeStep === 6 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Pull visible LinkedIn profile data</h3><p>Apify data enriches the existing SerpAPI evidence. Visibility and matched queries are preserved.</p></div>
-            <div className="summary-cards"><Metric label="Candidates" value={profileCandidates.length} /><Metric label="Pending Apify" value={apifyPendingCount} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Apify failed" value={apifyFailCount} /></div>
+            <div className="summary-cards"><Metric label="Shortlisted candidates" value={shortlistedCandidates.length} /><Metric label="Pending Apify" value={apifyPendingCount} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Apify failed" value={apifyFailCount} /></div>
             <div className="run-settings compact-settings">
               <label><span>Apify batch size</span><input type="number" min={1} value={apifyBatchSize} onChange={(event) => setApifyBatchSize(Math.max(1, Number(event.target.value || 1)))} /></label>
               <div className="estimate">Next batch will run <strong>{Math.min(apifyBatchSize, apifyPendingCount)}</strong> pending profiles. Run all will process <strong>{apifyPendingCount}</strong>.</div>
@@ -730,7 +736,7 @@ export default function Home() {
               <SmallButton variant="primary" disabled={apifyPendingCount === 0} onClick={() => runAction(`Scrape next ${Math.min(apifyBatchSize, apifyPendingCount)} profiles with Apify`, () => scrapeProfilesWithApify(false))}>Scrape Next Batch</SmallButton>
               <SmallButton disabled={apifyPendingCount === 0} onClick={() => runAction("Scrape all remaining profiles with Apify", () => scrapeProfilesWithApify(true))}>Scrape All Remaining</SmallButton>
             </div>
-            <ApifyProfileTable candidates={profileCandidates} onEvidence={setEvidenceCandidate} />
+            <ApifyProfileTable candidates={shortlistedCandidates} onEvidence={setEvidenceCandidate} />
           </section>
         )}
 
@@ -753,9 +759,9 @@ export default function Home() {
               <label className="switch-row"><input type="checkbox" checked={profileFilterForm.require_layoff_signal} onChange={(event) => setProfileFilterForm({ ...profileFilterForm, require_layoff_signal: event.target.checked })} /> Require layoff signal</label>
               <label className="switch-row"><input type="checkbox" checked={profileFilterForm.require_no_promotion_signal} onChange={(event) => setProfileFilterForm({ ...profileFilterForm, require_no_promotion_signal: event.target.checked })} /> Require no-promotion signal</label>
             </div>
-            <div className="summary-cards"><Metric label="Total parsed" value={profileCandidates.filter((c) => c.apify_status !== "pending_apify").length} /><Metric label="Passed" value={profileCandidates.filter((c) => c.passes_profile_filter).length} /><Metric label="Failed" value={profileCandidates.filter((c) => c.passes_profile_filter === false).length} /><Metric label="Location unknown" value={profileCandidates.filter((c) => c.actual_location_status === "unknown").length} /></div>
+            <div className="summary-cards"><Metric label="Total parsed" value={shortlistedCandidates.filter((c) => c.apify_status !== "pending_apify").length} /><Metric label="Passed" value={shortlistedCandidates.filter((c) => c.passes_profile_filter).length} /><Metric label="Failed" value={shortlistedCandidates.filter((c) => c.passes_profile_filter === false).length} /><Metric label="Location unknown" value={shortlistedCandidates.filter((c) => c.actual_location_status === "unknown").length} /></div>
             <div className="actions"><SmallButton onClick={() => openPromptEditor("profileFilters")}>Edit Filter Logic</SmallButton><SmallButton variant="primary" onClick={() => runAction("Apply profile filters", () => api<AppState>("/api/profile-filters/run", { method: "POST", body: JSON.stringify(profileFilterForm) }))}>Apply Profile Filters</SmallButton></div>
-            <ProfileFilterTable candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save profile filter decisions", saveCandidates)} />
+            <ProfileFilterTable candidates={shortlistedCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save profile filter decisions", saveCandidates)} />
           </section>
         )}
 
@@ -771,8 +777,8 @@ export default function Home() {
               <label className="switch-row"><input type="checkbox" checked={scoreSettings.onlyScraped} onChange={(event) => setScoreSettings({ ...scoreSettings, onlyScraped: event.target.checked })} /> prefer scraped/partial profiles</label>
             </div>
             <div className="actions"><SmallButton onClick={() => openPromptEditor("scoring")}>Edit Prompt</SmallButton><SmallButton variant="primary" onClick={() => runAction("Fit scoring", () => api<AppState>("/api/analyze/run", { method: "POST", body: JSON.stringify({ mode: "fit", ...scoreSettings }) }))}>Run Fit Score</SmallButton><SmallButton onClick={() => setActiveStep(9)}>Skip</SmallButton></div>
-            <div className="summary-cards"><Metric label="Profiles" value={profileCandidates.length} /><Metric label="Scored" value={scoredCount} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Default cap" value={scoreSettings.maxCandidates} /></div>
-            <ScoredTable candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save scores", saveCandidates)} onEvidence={setEvidenceCandidate} />
+            <div className="summary-cards"><Metric label="Profiles" value={shortlistedCandidates.length} /><Metric label="Scored" value={scoredCount} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Default cap" value={scoreSettings.maxCandidates} /></div>
+            <ScoredTable candidates={shortlistedCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save scores", saveCandidates)} onEvidence={setEvidenceCandidate} />
           </section>
         )}
 
@@ -780,8 +786,8 @@ export default function Home() {
           <section className="panel simple">
             <div className="section-heading"><h3>Human review gate</h3><p>Approve profiles before any Apollo spend. You can also download the scored shortlist here while Apollo is paused.</p></div>
             <div className="actions compact-actions"><a className="button primary" href={downloadUrl("xlsx")}>Download scored XLSX</a><a className="button secondary" href={downloadUrl("csv")}>Download scored CSV</a><a className="button secondary" href={downloadUrl("json")}>Download scored JSON</a></div>
-            <div className="summary-cards"><Metric label="Approved" value={approvedCount} /><Metric label="Rejected" value={profileCandidates.filter((c) => c.manual_status === "rejected").length} /><Metric label="Needs enrichment" value={profileCandidates.filter((c) => c.needs_contact_enrichment).length} /></div>
-            <ScoredTable candidates={profileCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save manual review", saveCandidates)} onEvidence={setEvidenceCandidate} manual />
+            <div className="summary-cards"><Metric label="Approved" value={approvedCount} /><Metric label="Rejected" value={rejectedProfileCount} /><Metric label="Needs enrichment" value={shortlistedCandidates.filter((c) => c.needs_contact_enrichment).length} /></div>
+            <ScoredTable candidates={shortlistedCandidates} updateCandidate={updateCandidate} saveCandidates={() => runAction("Save manual review", saveCandidates)} onEvidence={setEvidenceCandidate} manual />
           </section>
         )}
 
@@ -809,7 +815,7 @@ export default function Home() {
         {activeStep === 11 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Final recruiter sheet</h3><p>Only real LinkedIn profile URLs appear here. Post URLs are evidence-only in the drawer and export evidence column.</p></div>
-            <div className="summary-cards"><Metric label="Total candidates" value={profileCandidates.length} /><Metric label="Tier 1" value={tierCounts["Tier 1"]} /><Metric label="Tier 2" value={tierCounts["Tier 2"]} /><Metric label="Emails found" value={foundEmails} /><Metric label="Phones found" value={foundPhones} /></div>
+            <div className="summary-cards"><Metric label="Total candidates" value={shortlistedCandidates.length} /><Metric label="Tier 1" value={tierCounts["Tier 1"]} /><Metric label="Tier 2" value={tierCounts["Tier 2"]} /><Metric label="Emails found" value={foundEmails} /><Metric label="Phones found" value={foundPhones} /></div>
             <div className="final-tools">
               <div className="filters">
                 <label><span>Tier</span><select value={finalFilter.tier} onChange={(event) => setFinalFilter({ ...finalFilter, tier: event.target.value })}><option value="all">All tiers</option>{tiers.map((tier) => <option key={tier}>{tier}</option>)}</select></label>

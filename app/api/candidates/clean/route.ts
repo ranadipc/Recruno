@@ -44,12 +44,17 @@ export async function POST() {
     const shouldReject = Boolean(deterministicReason) || ai?.decision === "reject";
     const needsReview = ai?.decision === "review";
     const reason = deterministicReason || ai?.reason || "";
+    const screenStatus = shouldReject ? "ai_rejected" : needsReview ? "ai_review" : "ai_passed";
+    const reasonPrefix = shouldReject ? "Clean screen rejected" : needsReview ? "Clean screen review" : "Clean screen passed";
+    const priorRiskFlags = (candidate.risk_flags ?? []).filter((flag) => !flag.startsWith("Clean screen "));
+    const priorSourceFlags = (candidate.raw_source_flags ?? []).filter((flag) => !flag.startsWith("ai_validation:"));
     return {
       ...candidate,
-      status: shouldReject ? "ai_rejected" : needsReview ? "ai_review" : candidate.status === "ai_rejected" ? "pending_apify" : candidate.status,
+      status: screenStatus,
       manual_status: shouldReject ? "rejected" as const : candidate.status === "ai_rejected" ? "pending" as const : candidate.manual_status,
       needs_contact_enrichment: shouldReject ? false : candidate.needs_contact_enrichment,
-      risk_flags: reason ? Array.from(new Set([...(candidate.risk_flags ?? []), `${shouldReject ? "Clean screen rejected" : "Clean screen review"}: ${reason}`])) : candidate.risk_flags,
+      risk_flags: reason ? Array.from(new Set([...priorRiskFlags, `${reasonPrefix}: ${reason}`])) : priorRiskFlags,
+      raw_source_flags: Array.from(new Set([...priorSourceFlags, `ai_validation:${screenStatus}`])),
       recommended_manual_checks: needsReview && reason ? Array.from(new Set([...(candidate.recommended_manual_checks ?? []), reason])) : candidate.recommended_manual_checks
     };
   });

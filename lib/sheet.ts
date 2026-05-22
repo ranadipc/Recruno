@@ -1,12 +1,32 @@
 import type { Candidate } from "./types";
 import { flatten, isLinkedInProfileUrl } from "./utils";
 
-export function recruiterRows(candidates: Candidate[]) {
-  return candidates.filter((candidate) => isLinkedInProfileUrl(candidate.normalized_linkedin_url)).map((candidate) => ({
+function aiValidationStatus(candidate: Candidate) {
+  if (candidate.status === "ai_rejected" || candidate.manual_status === "rejected" || candidate.status === "deleted") return "rejected";
+  if (candidate.status === "ai_review") return "review";
+  if (candidate.status === "ai_passed") return "ai_passed";
+  const flag = candidate.raw_source_flags?.find((item) => item.startsWith("ai_validation:"));
+  if (flag) return flag.replace("ai_validation:", "");
+  return candidate.status || "";
+}
+
+function aiValidationReason(candidate: Candidate) {
+  return [...(candidate.risk_flags ?? []), ...(candidate.recommended_manual_checks ?? [])]
+    .filter((item) => /clean screen|ai|excluded|mismatch|not relevant|seniority|role/i.test(item))
+    .join("; ");
+}
+
+export function recruiterRows(candidates: Candidate[], options: { includeRejected?: boolean } = {}) {
+  return candidates
+    .filter((candidate) => isLinkedInProfileUrl(candidate.normalized_linkedin_url))
+    .filter((candidate) => options.includeRejected || (candidate.manual_status !== "rejected" && candidate.status !== "ai_rejected" && candidate.status !== "deleted"))
+    .map((candidate) => ({
     "Candidate Name": candidate.profile_data?.name || candidate.name_guess,
     "LinkedIn URL": `https://${candidate.normalized_linkedin_url}`,
     "Current Title": candidate.profile_data?.current_title || candidate.title_guess,
     "Current Company": candidate.profile_data?.current_company || candidate.company_guess,
+    "AI Validation": aiValidationStatus(candidate),
+    "AI Validation Reason": aiValidationReason(candidate),
     "Past Company / Past Experience": flatten(candidate.profile_data?.past_companies || candidate.profile_data?.experience),
     Location: candidate.profile_data?.location || "",
     Education: flatten(candidate.profile_data?.education),
