@@ -242,6 +242,7 @@ export default function Home() {
   const [workflow, setWorkflow] = useState<WorkflowSettings>(DEFAULT_WORKFLOW);
   const [runSettings, setRunSettings] = useState({ pagesPerQuery: 2, startOffset: 0, maxSearches: 100, delayMs: 0, location: "India", targetCountry: "India", strictIndiaOnly: true, keepUnknownLocation: true });
   const [scoreSettings, setScoreSettings] = useState({ maxCandidates: 50, onlyScraped: true });
+  const [apifyBatchSize, setApifyBatchSize] = useState(DEFAULT_WORKFLOW.maxProfilesToApify);
   const [profileFilterForm, setProfileFilterForm] = useState<ProfileFilters>({
     actual_location_must_include: [],
     current_title_must_include: [],
@@ -373,6 +374,7 @@ export default function Home() {
   const selectedQueries = state.queries.filter((query) => query.selected);
   const apifySuccessCount = profileCandidates.filter((c) => c.apify_status === "apify_success" || c.apify_status === "apify_partial").length;
   const apifyFailCount = profileCandidates.filter((c) => c.apify_status === "apify_failed").length;
+  const apifyPendingCount = profileCandidates.filter((c) => c.apify_status === "pending_apify" && c.manual_status !== "rejected").length;
   const scoredCount = profileCandidates.filter((c) => typeof c.total_score === "number").length;
   const approvedCount = profileCandidates.filter((candidate) => candidate.manual_status === "approved").length;
   const tierCounts = Object.fromEntries(tiers.map((tier) => [tier, profileCandidates.filter((candidate) => (candidate.tier ?? "Tier 4") === tier).length])) as Record<Tier, number>;
@@ -506,11 +508,12 @@ export default function Home() {
     setOneClickText(await file.text());
   }
 
-  async function scrapeProfilesWithApify() {
+  async function scrapeProfilesWithApify(runAll = false) {
     const next = await api<AppState>("/api/apify/run", {
       method: "POST",
       body: JSON.stringify({
-        maxProfiles: workflow.maxProfilesToApify,
+        maxProfiles: apifyBatchSize,
+        runAll,
         candidates: profileCandidates
       })
     });
@@ -718,8 +721,15 @@ export default function Home() {
         {activeStep === 6 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Pull visible LinkedIn profile data</h3><p>Apify data enriches the existing SerpAPI evidence. Visibility and matched queries are preserved.</p></div>
-            <div className="summary-cards"><Metric label="Candidates" value={profileCandidates.length} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Apify failed" value={apifyFailCount} /><Metric label="Run cap" value={workflow.maxProfilesToApify} /></div>
-            <div className="actions"><SmallButton variant="primary" onClick={() => runAction("Scrape profiles with Apify", scrapeProfilesWithApify)}>Scrape Profiles with Apify</SmallButton></div>
+            <div className="summary-cards"><Metric label="Candidates" value={profileCandidates.length} /><Metric label="Pending Apify" value={apifyPendingCount} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Apify failed" value={apifyFailCount} /></div>
+            <div className="run-settings compact-settings">
+              <label><span>Apify batch size</span><input type="number" min={1} value={apifyBatchSize} onChange={(event) => setApifyBatchSize(Math.max(1, Number(event.target.value || 1)))} /></label>
+              <div className="estimate">Next batch will run <strong>{Math.min(apifyBatchSize, apifyPendingCount)}</strong> pending profiles. Run all will process <strong>{apifyPendingCount}</strong>.</div>
+            </div>
+            <div className="actions">
+              <SmallButton variant="primary" disabled={apifyPendingCount === 0} onClick={() => runAction(`Scrape next ${Math.min(apifyBatchSize, apifyPendingCount)} profiles with Apify`, () => scrapeProfilesWithApify(false))}>Scrape Next Batch</SmallButton>
+              <SmallButton disabled={apifyPendingCount === 0} onClick={() => runAction("Scrape all remaining profiles with Apify", () => scrapeProfilesWithApify(true))}>Scrape All Remaining</SmallButton>
+            </div>
             <ApifyProfileTable candidates={profileCandidates} onEvidence={setEvidenceCandidate} />
           </section>
         )}
@@ -1019,8 +1029,8 @@ function CandidateEditor({ candidates, updateCandidate, saveCandidates }: { cand
   return (
     <div className="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>LinkedIn profile</th><th>Title</th><th>Company</th><th>Visibility</th><th>Status</th><th>Evidence notes</th><th /></tr></thead>
-        <tbody>{candidates.map((candidate) => <tr key={candidate.id}><td><input value={candidate.name_guess} onChange={(event) => updateCandidate(candidate.id, { name_guess: event.target.value })} /></td><td><a href={profileUrl(candidate)} target="_blank">{candidate.normalized_linkedin_url}</a></td><td><input value={candidate.title_guess} onChange={(event) => updateCandidate(candidate.id, { title_guess: event.target.value })} /></td><td><input value={candidate.company_guess} onChange={(event) => updateCandidate(candidate.id, { company_guess: event.target.value })} /></td><td><span className="badge neutral">Visibility: {candidate.visibility_factor}</span></td><td><span className={badgeClass(apifyStatusLabel(candidate.apify_status))}>{apifyStatusLabel(candidate.apify_status)}</span></td><td className="clip">{candidate.snippets.join(" | ")}</td><td><SmallButton variant="danger" onClick={() => updateCandidate(candidate.id, { status: "deleted", manual_status: "rejected" })}>Reject</SmallButton></td></tr>)}</tbody>
+        <thead><tr><th>Name</th><th>LinkedIn profile</th><th>Title</th><th>Company</th><th>Visibility</th><th>Screen</th><th>Evidence notes</th><th /></tr></thead>
+        <tbody>{candidates.map((candidate) => <tr key={candidate.id}><td><input value={candidate.name_guess} onChange={(event) => updateCandidate(candidate.id, { name_guess: event.target.value })} /></td><td><a href={profileUrl(candidate)} target="_blank">{candidate.normalized_linkedin_url}</a></td><td><input value={candidate.title_guess} onChange={(event) => updateCandidate(candidate.id, { title_guess: event.target.value })} /></td><td><input value={candidate.company_guess} onChange={(event) => updateCandidate(candidate.id, { company_guess: event.target.value })} /></td><td><span className="badge neutral">Visibility: {candidate.visibility_factor}</span></td><td><span className={badgeClass(candidate.status)}>{candidate.status}</span></td><td className="clip">{[...(candidate.risk_flags ?? []), ...candidate.snippets].join(" | ")}</td><td><SmallButton variant="danger" onClick={() => updateCandidate(candidate.id, { status: "deleted", manual_status: "rejected" })}>Reject</SmallButton></td></tr>)}</tbody>
       </table>
       <div className="actions"><SmallButton onClick={saveCandidates}>Save Candidate Edits</SmallButton></div>
     </div>

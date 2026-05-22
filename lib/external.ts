@@ -291,6 +291,48 @@ ${JSON.stringify(candidate)}
   };
 }
 
+export async function screenCandidatesAgainstBrief(settings: Settings, brief: Brief | undefined, candidates: Candidate[]) {
+  if (!brief || candidates.length === 0 || !settings.OPENAI_API_KEY) return new Map<string, { decision: "keep" | "reject" | "review"; reason: string }>();
+  const decisions = new Map<string, { decision: "keep" | "reject" | "review"; reason: string }>();
+  const chunks = Array.from({ length: Math.ceil(candidates.length / 40) }, (_, index) => candidates.slice(index * 40, index * 40 + 40));
+  for (const chunk of chunks) {
+    const prompt = `
+You are screening LinkedIn search-result candidates before Apify scraping.
+Return JSON only:
+{"decisions":[{"id":"candidate id","decision":"keep|reject|review","reason":"short reason"}]}
+
+Rules:
+- Use the JD/brief and structured fields as the source of truth.
+- Reject obvious bad fits such as wrong function, wrong seniority, excluded titles, unrelated education-only matches, or profiles that only matched a loose Google keyword.
+- For example, a PM/director/senior backend engineer is not a good customer-support candidate unless the brief explicitly asks for that.
+- If the candidate might fit but evidence is thin, use review, not reject.
+- Do not reject only because location is unknown.
+- Keep rows that plausibly match the target role.
+- Keep the reason under 18 words.
+
+Brief:
+${JSON.stringify(brief)}
+
+Candidates:
+${JSON.stringify(chunk.map((candidate) => ({
+  id: candidate.id,
+  name: candidate.name_guess,
+  title: candidate.title_guess,
+  company: candidate.company_guess,
+  snippets: candidate.snippets.slice(0, 3),
+  matched_queries: candidate.matched_filter_hints.slice(0, 3)
+})))}
+`;
+    const parsed = await openaiJson<{ decisions?: Array<{ id?: string; decision?: string; reason?: string }> }>(settings, prompt);
+    for (const item of parsed.decisions ?? []) {
+      if (!item.id) continue;
+      const decision = item.decision === "reject" ? "reject" : item.decision === "review" ? "review" : "keep";
+      decisions.set(item.id, { decision, reason: item.reason || "AI relevance screen." });
+    }
+  }
+  return decisions;
+}
+
 export async function testProvider(settings: Settings, provider: string) {
   if (provider === "openai") {
     await openaiJson(settings, "Return JSON only: {\"ok\":true,\"message\":\"OpenAI reachable\"}");

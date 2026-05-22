@@ -32,18 +32,22 @@ export async function POST(request: Request) {
     const settings = await getSettings();
     const state = await getState();
     const selectedIds = new Set<string>(body.candidateIds ?? []);
-    const max = Number(body.maxProfiles || settings.workflow.maxProfilesToApify);
+    const runAll = body.runAll === true;
+    const includeRejected = body.includeRejected === true;
+    const max = runAll ? Number.MAX_SAFE_INTEGER : Number(body.maxProfiles || settings.workflow.maxProfilesToApify);
     const requestCandidates = Array.isArray(body.candidates) ? body.candidates as Candidate[] : [];
     const sourceCandidates = state.candidates.length > 0 ? state.candidates : requestCandidates;
     const profileCandidates = sourceCandidates.filter((candidate) => candidate.normalized_linkedin_url?.startsWith("linkedin.com/in/"));
     const selected = profileCandidates
       .filter((candidate) => selectedIds.size === 0 || selectedIds.has(candidate.id))
+      .filter((candidate) => includeRejected || candidate.manual_status !== "rejected")
+      .filter((candidate) => selectedIds.size > 0 || candidate.apify_status === "pending_apify")
       .sort((a, b) => {
         const statusRank = (status: string) => status === "pending_apify" ? 0 : status === "apify_partial" ? 1 : status === "apify_failed" ? 2 : 3;
         return statusRank(a.apify_status) - statusRank(b.apify_status) || b.visibility_factor - a.visibility_factor;
       })
       .slice(0, max);
-    if (selected.length === 0) return NextResponse.json({ error: "No LinkedIn profile candidates available for Apify. Clean SerpAPI data first." }, { status: 400 });
+    if (selected.length === 0) return NextResponse.json({ error: "No pending LinkedIn profile candidates available for Apify. Clean SerpAPI data first, or all non-rejected profiles are already done." }, { status: 400 });
     const outputs = await runApify(settings, selected, state.brief);
     const byId = new Map(outputs.map((output) => [output.candidate.id, output]));
     const currentCandidates = state.candidates.length > 0 ? state.candidates : sourceCandidates;
