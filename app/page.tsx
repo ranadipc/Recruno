@@ -21,6 +21,7 @@ const queryTypes: QueryType[] = ["profile_location", "profile_keyword", "profile
 const tiers: Tier[] = ["Tier 1", "Tier 2", "Tier 3", "Tier 4"];
 
 type Estimate = { email: number; phone: number; total: number; selected: number } | null;
+// Keep browser-side workflow recovery separate from persisted server state.
 const WORKFLOW_BACKUP_KEY = "recruno-automated-leads.workflow-state.v1";
 
 function emptyState(): AppState {
