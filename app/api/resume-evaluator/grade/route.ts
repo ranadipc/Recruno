@@ -54,6 +54,14 @@ function clampScore(value: unknown, fallback = 0) {
   return Math.max(0, Math.min(100, Math.round(number)));
 }
 
+function normalizeIndianPhone(value: unknown) {
+  let phone = asString(value);
+  phone = phone.replace(/^\s*(?:\+?91|0091)[\s-]*/i, "");
+  phone = phone.replace(/[^\d]/g, "");
+  if (phone.length > 10 && phone.startsWith("91")) phone = phone.slice(2);
+  return phone;
+}
+
 function normalizeGrade(value: unknown): FixedResumeGrade {
   const input = value && typeof value === "object" && !Array.isArray(value) ? value as ResumeGrade : {};
   const remarks = input.remarks && typeof input.remarks === "object" && !Array.isArray(input.remarks) ? input.remarks as ResumeGrade : {};
@@ -72,7 +80,7 @@ function normalizeGrade(value: unknown): FixedResumeGrade {
   const recommendation = asString(input.recommendation);
   return {
     name: asString(input.name || input.candidateName || input["Candidate Name"]) || "Unknown candidate",
-    phoneNumber: asString(input.phoneNumber || input.phone || input["Phone Number"]),
+    phoneNumber: normalizeIndianPhone(input.phoneNumber || input.phone || input["Phone Number"]),
     linkedInUrl: asString(input.linkedInUrl || input.linkedinUrl || input.linkedin || input["LinkedIn URL"]),
     totalScore: clampScore(input.totalScore || input.score || input["Total Score"]),
     recommendation: allowed.has(recommendation) ? recommendation as FixedResumeGrade["recommendation"] : "Maybe",
@@ -151,6 +159,7 @@ Return only valid JSON with exactly this shape:
 
 Rules:
 - Always extract name, phoneNumber, and linkedInUrl when visible in the resume. Use empty string if not found.
+- For Indian phone numbers, remove the country code. If the resume says "+91 9999999999", phoneNumber must be "9999999999". Do not include leading +, =, spaces, or country code in phoneNumber.
 - totalScore must be an integer from 0 to 100.
 - recommendation must be one of the allowed values.
 - subMarks must be quantifiable rubric section marks, not qualitative labels. If the user's rubric has sections, use those section names. If it does not, create 3-5 practical sections from the rubric.

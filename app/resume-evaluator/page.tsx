@@ -8,6 +8,7 @@ const STORE_NAME = "projects";
 const MAX_PDF_BYTES = 3_000_000;
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const DEFAULT_BATCH_SIZE = 10;
+const DEFAULT_BATCH_DELAY_SECONDS = 3;
 const DEFAULT_SHORTLIST_SCORE = 80;
 const DEFAULT_REJECTION_SCORE = 45;
 const SUPPORTED_EXTENSIONS = new Set(["pdf", "doc", "docx"]);
@@ -49,8 +50,10 @@ type ResumeProject = {
   rubric: string;
   model: string;
   batchSize: number;
+  batchDelaySeconds: number;
   shortlistScore: number;
   rejectionScore: number;
+  exportMinScore: number;
   files: ResumeFile[];
   createdAt: string;
   updatedAt: string;
@@ -182,15 +185,20 @@ function canUseTextOnly(fileName: string, text: string) {
   return (extension === "doc" || extension === "docx") ? text.length >= 100 : text.length >= 500;
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function rowsForExport(project: ResumeProject) {
   return project.files
     .filter((file) => file.result)
+    .filter((file) => typeof file.result?.totalScore === "number" && file.result.totalScore >= project.exportMinScore)
     .map((file) => ({
       "File Name": file.fileName,
       Name: file.result?.name ?? "",
       "Phone Number": file.result?.phoneNumber ?? "",
-      "LinkedIn URL": file.result?.linkedInUrl ?? "",
       "Total Score": file.result?.totalScore ?? "",
+      "LinkedIn URL": file.result?.linkedInUrl ?? "",
       "Decision Band": decisionBand(file.result?.totalScore, project),
       Recommendation: file.result?.recommendation ?? "",
       "Sub Marks": formatSubMarks(file.result?.subMarks),
@@ -248,8 +256,10 @@ function newProject(name = "Resume Screening Project"): ResumeProject {
     rubric: DEFAULT_RUBRIC,
     model: DEFAULT_MODEL,
     batchSize: DEFAULT_BATCH_SIZE,
+    batchDelaySeconds: DEFAULT_BATCH_DELAY_SECONDS,
     shortlistScore: DEFAULT_SHORTLIST_SCORE,
     rejectionScore: DEFAULT_REJECTION_SCORE,
+    exportMinScore: 70,
     files: [],
     createdAt: now,
     updatedAt: now
@@ -288,8 +298,10 @@ export default function ResumeEvaluatorPage() {
                 ...project,
                 model: project.model || DEFAULT_MODEL,
                 batchSize: project.batchSize || DEFAULT_BATCH_SIZE,
+                batchDelaySeconds: project.batchDelaySeconds ?? DEFAULT_BATCH_DELAY_SECONDS,
                 shortlistScore: project.shortlistScore || DEFAULT_SHORTLIST_SCORE,
-                rejectionScore: project.rejectionScore || DEFAULT_REJECTION_SCORE
+                rejectionScore: project.rejectionScore || DEFAULT_REJECTION_SCORE,
+                exportMinScore: project.exportMinScore ?? 70
               }))
               .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
           : [newProject()];
@@ -475,31 +487,35 @@ export default function ResumeEvaluatorPage() {
     stopRequestedRef.current = false;
     const queue = activeProject.files.filter((file) => (file.status === "queued" || file.status === "failed") && file.blob);
     const concurrency = Math.max(1, Math.min(25, Math.floor(Number(activeProject.batchSize || DEFAULT_BATCH_SIZE))));
+    const delayMs = Math.max(0, Math.min(60, Number(activeProject.batchDelaySeconds ?? DEFAULT_BATCH_DELAY_SECONDS))) * 1000;
     let cursor = 0;
     let completed = 0;
     setMessage(`Grading ${queue.length} resumes with ${concurrency} parallel request${concurrency === 1 ? "" : "s"}...`);
-    async function worker() {
-      while (!stopRequestedRef.current) {
-        const file = queue[cursor];
-        cursor += 1;
-        if (!file) return;
-        const controller = new AbortController();
-        controllersRef.current.add(controller);
-        try {
-          await gradeFile(activeProject.id, file, activeProject.rubric, activeProject.model, controller.signal);
-          completed += 1;
-          setMessage(`Graded ${completed}/${queue.length}. Running up to ${concurrency} at a time.`);
-        } catch (error) {
-          updateFile(activeProject.id, file.id, {
-            status: "queued",
-            error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Grading failed."
-          });
-        } finally {
-          controllersRef.current.delete(controller);
-        }
+    async function gradeBatchFile(file: ResumeFile) {
+      const controller = new AbortController();
+      controllersRef.current.add(controller);
+      try {
+        await gradeFile(activeProject.id, file, activeProject.rubric, activeProject.model, controller.signal);
+        completed += 1;
+        setMessage(`Graded ${completed}/${queue.length}. Running up to ${concurrency} at a time.`);
+      } catch (error) {
+        updateFile(activeProject.id, file.id, {
+          status: "queued",
+          error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Grading failed."
+        });
+      } finally {
+        controllersRef.current.delete(controller);
       }
     }
-    await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()));
+    while (cursor < queue.length && !stopRequestedRef.current) {
+      const batch = queue.slice(cursor, cursor + concurrency);
+      cursor += batch.length;
+      await Promise.all(batch.map((file) => gradeBatchFile(file)));
+      if (cursor < queue.length && !stopRequestedRef.current && delayMs > 0) {
+        setMessage(`Batch complete. Waiting ${delayMs / 1000}s before the next batch...`);
+        await sleep(delayMs);
+      }
+    }
     setMessage(stopRequestedRef.current ? `Stopped grading. Completed ${completed}/${queue.length}; remaining files stayed queued.` : `Finished grading ${queue.length} resume${queue.length === 1 ? "" : "s"}.`);
     stopRequestedRef.current = false;
     setIsRunning(false);
@@ -692,7 +708,33 @@ export default function ResumeEvaluatorPage() {
                       onChange={(event) => updateActiveProject({ batchSize: Math.max(1, Math.min(25, Number(event.target.value) || DEFAULT_BATCH_SIZE)) })}
                     />
                   </label>
-                  <p>Use 10 for 100-150 resumes. Lower it if OpenAI rate limits or Vercel times out.</p>
+                  <label>
+                    <span>Pause after each batch</span>
+                    <select
+                      value={activeProject.batchDelaySeconds ?? DEFAULT_BATCH_DELAY_SECONDS}
+                      onChange={(event) => updateActiveProject({ batchDelaySeconds: Number(event.target.value) })}
+                    >
+                      <option value={0}>No delay</option>
+                      <option value={3}>3 seconds</option>
+                      <option value={5}>5 seconds</option>
+                      <option value={10}>10 seconds</option>
+                      <option value={20}>20 seconds</option>
+                    </select>
+                  </label>
+                  <p>Use 10 at a time with a 3-5s pause for 100-150 resumes. Lower it if OpenAI rate limits or your machine feels slow.</p>
+                </div>
+                <div className="resume-run-settings resume-export-filter">
+                  <label>
+                    <span>Download candidates above score</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={activeProject.exportMinScore ?? 70}
+                      onChange={(event) => updateActiveProject({ exportMinScore: Math.max(0, Math.min(100, Number(event.target.value) || 0)) })}
+                    />
+                  </label>
+                  <p>XLSX, CSV, and JSON downloads only include candidates at or above this score.</p>
                 </div>
                 <div className="resume-actions">
                   <button className="resume-button primary" disabled={isRunning || !activeProject.files.some((file) => (file.status === "queued" || file.status === "failed") && file.blob)} onClick={() => void handleGradeAll()}>

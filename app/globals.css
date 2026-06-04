@@ -551,10 +551,14 @@ code { background: #eef2f6; border: 1px solid #dbe2ea; border-radius: 4px; paddi
 
 .resume-run-settings {
   display: grid;
-  grid-template-columns: 170px minmax(0, 1fr);
+  grid-template-columns: 170px 190px minmax(0, 1fr);
   gap: 12px;
   align-items: end;
   margin-bottom: 14px;
+}
+
+.resume-run-settings.resume-export-filter {
+  grid-template-columns: 220px minmax(0, 1fr);
 }
 
 .resume-run-settings label {
