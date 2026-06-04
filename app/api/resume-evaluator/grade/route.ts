@@ -108,8 +108,12 @@ export async function POST(request: Request) {
     if (!SUPPORTED_EXTENSIONS.has(extension)) {
       return NextResponse.json({ error: "Only PDF, DOC, and DOCX resumes can be graded." }, { status: 400 });
     }
-    if (file.size > MAX_PDF_BYTES) {
+    const textOnlyDocument = extension === "doc" || extension === "docx";
+    if (file.size > MAX_PDF_BYTES && extractedText.length < 500 && !(textOnlyDocument && extractedText.length >= 100)) {
       return NextResponse.json({ error: "This file is too large for the v1 upload path. Keep files under 3 MB." }, { status: 413 });
+    }
+    if (textOnlyDocument && extractedText.length < 100) {
+      return NextResponse.json({ error: "Could not extract enough text from this DOC/DOCX file. Please convert it to PDF or upload a text-readable DOCX." }, { status: 400 });
     }
     if (!rubric) {
       return NextResponse.json({ error: "Add a rubric prompt before grading." }, { status: 400 });
@@ -120,7 +124,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "OPENAI_API_KEY is missing. Add it in Settings or Vercel environment variables." }, { status: 400 });
     }
 
-    const useExtractedText = extractedText.length >= 500;
+    const useExtractedText = textOnlyDocument || extractedText.length >= 500;
     const prompt = `
 You are grading a resume for a recruiting workflow.
 
@@ -142,7 +146,7 @@ Return only valid JSON with exactly this shape:
     "missingEvidence": ["string"],
     "risks": ["string"]
   },
-  "summary": "string",
+  "summary": "string"
 }
 
 Rules:
@@ -165,7 +169,7 @@ ${useExtractedText ? `\nResume text extracted locally to reduce cost:\n${extract
     const content: Array<Record<string, string>> = useExtractedText ? [{ type: "input_text", text: prompt }] : [];
     if (!useExtractedText) {
       const buffer = Buffer.from(await file.arrayBuffer());
-      const mime = file.type || MIME_BY_EXTENSION[extension] || "application/octet-stream";
+      const mime = MIME_BY_EXTENSION[extension] || file.type || "application/octet-stream";
       const fileData = `data:${mime};base64,${buffer.toString("base64")}`;
       content.push({ type: "input_file", filename: fileName, file_data: fileData }, { type: "input_text", text: prompt });
     }

@@ -177,6 +177,11 @@ function decisionBand(score: number | undefined, project: Pick<ResumeProject, "s
   return "Review";
 }
 
+function canUseTextOnly(fileName: string, text: string) {
+  const extension = extensionFor(fileName);
+  return (extension === "doc" || extension === "docx") ? text.length >= 100 : text.length >= 500;
+}
+
 function rowsForExport(project: ResumeProject) {
   return project.files
     .filter((file) => file.result)
@@ -375,13 +380,14 @@ export default function ResumeEvaluatorPage() {
       }
       const blob = await entry.async("blob");
       const extracted = await extractResumeText(blob, name);
+      const canGrade = blob.size <= MAX_PDF_BYTES || canUseTextOnly(name, extracted.text);
       resumeFiles.push({
         id: id("file"),
         fileName: name,
         size: blob.size,
         source: file.name,
-        status: blob.size > MAX_PDF_BYTES ? "failed" : "queued",
-        error: blob.size > MAX_PDF_BYTES ? "File is over the 3 MB v1 upload limit." : undefined,
+        status: canGrade ? "queued" : "failed",
+        error: canGrade ? undefined : "File is over the 3 MB v1 upload limit and local text extraction was too sparse.",
         blob,
         extractedText: extracted.text,
         extractionMethod: extracted.method
@@ -399,13 +405,14 @@ export default function ResumeEvaluatorPage() {
         collected.push(...await filesFromZip(file));
       } else if (isSupportedResume(file.name)) {
         const extracted = await extractResumeText(file, file.name);
+        const canGrade = file.size <= MAX_PDF_BYTES || canUseTextOnly(file.name, extracted.text);
         collected.push({
           id: id("file"),
           fileName: file.name,
           size: file.size,
           source: "direct upload",
-          status: file.size > MAX_PDF_BYTES ? "failed" : "queued",
-          error: file.size > MAX_PDF_BYTES ? "File is over the 3 MB v1 upload limit." : undefined,
+          status: canGrade ? "queued" : "failed",
+          error: canGrade ? undefined : "File is over the 3 MB v1 upload limit and local text extraction was too sparse.",
           blob: file,
           extractedText: extracted.text,
           extractionMethod: extracted.method
@@ -424,8 +431,8 @@ export default function ResumeEvaluatorPage() {
       updateFile(projectId, file.id, { status: "failed", error: "Original file data is missing. Re-upload this file." });
       return;
     }
-    if (file.blob.size > MAX_PDF_BYTES) {
-      updateFile(projectId, file.id, { status: "failed", error: "File is over the 3 MB v1 upload limit." });
+    if (file.blob.size > MAX_PDF_BYTES && !canUseTextOnly(file.fileName, file.extractedText ?? "")) {
+      updateFile(projectId, file.id, { status: "failed", error: "File is over the 3 MB v1 upload limit and local text extraction was too sparse." });
       return;
     }
     updateFile(projectId, file.id, { status: "grading", error: undefined });
