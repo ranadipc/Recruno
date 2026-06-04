@@ -1,19 +1,31 @@
 import { NextResponse } from "next/server";
 import { getSettings } from "@/lib/store";
 
-const DEFAULT_MODEL = "gpt-5.2";
+const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_PDF_BYTES = 3_000_000;
+const SUPPORTED_EXTENSIONS = new Set(["pdf", "doc", "docx"]);
+const MIME_BY_EXTENSION: Record<string, string> = {
+  pdf: "application/pdf",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+};
 
-type ResumeGrade = {
-  candidateName: string;
+type ResumeGrade = Record<string, unknown>;
+type FixedResumeGrade = {
+  name: string;
+  phoneNumber: string;
+  linkedInUrl: string;
   totalScore: number;
-  recommendation: "Strong Yes" | "Yes" | "Maybe" | "No" | "Strong No";
-  categoryScores: Array<{ category: string; score: number; maxScore: number; evidence: string }>;
-  strengths: string[];
-  concerns: string[];
-  missingEvidence: string[];
+  recommendation: "Strong Select" | "Select" | "Maybe" | "Reject" | "Strong Reject";
+  subMarks: Array<{ section: string; score: number; maxScore: number; reason: string }>;
+  remarks: {
+    strengths: string[];
+    weaknesses: string[];
+    selectedOrRejectedReason: string;
+    missingEvidence: string[];
+    risks: string[];
+  };
   summary: string;
-  rawNotes: string;
 };
 
 function extractJson<T>(text: string): T {
@@ -22,8 +34,18 @@ function extractJson<T>(text: string): T {
   return JSON.parse(candidate) as T;
 }
 
+function outputText(payload: { output_text?: string; output?: Array<{ content?: Array<{ text?: string }> }> }) {
+  return payload.output_text ?? payload.output?.flatMap((item) => item.content ?? []).map((part) => part.text ?? "").join("\n") ?? "";
+}
+
+function asString(value: unknown) {
+  return String(value ?? "").trim();
+}
+
 function asStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : [];
+  if (Array.isArray(value)) return value.map((item) => asString(item)).filter(Boolean);
+  const text = asString(value);
+  return text ? [text] : [];
 }
 
 function clampScore(value: unknown, fallback = 0) {
@@ -32,31 +54,42 @@ function clampScore(value: unknown, fallback = 0) {
   return Math.max(0, Math.min(100, Math.round(number)));
 }
 
-function normalizeGrade(value: Partial<ResumeGrade>): ResumeGrade {
-  const allowed = new Set(["Strong Yes", "Yes", "Maybe", "No", "Strong No"]);
-  const categoryScores = Array.isArray(value.categoryScores)
-    ? value.categoryScores.map((item) => ({
-        category: String(item?.category ?? "Unspecified"),
-        score: clampScore(item?.score),
-        maxScore: Math.max(1, clampScore(item?.maxScore, 100)),
-        evidence: String(item?.evidence ?? "")
-      }))
+function normalizeGrade(value: unknown): FixedResumeGrade {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as ResumeGrade : {};
+  const remarks = input.remarks && typeof input.remarks === "object" && !Array.isArray(input.remarks) ? input.remarks as ResumeGrade : {};
+  const subMarks = Array.isArray(input.subMarks)
+    ? input.subMarks.map((item) => {
+        const mark = item && typeof item === "object" ? item as ResumeGrade : {};
+        return {
+          section: asString(mark.section || mark.category || "Unspecified"),
+          score: clampScore(mark.score),
+          maxScore: Math.max(1, clampScore(mark.maxScore, 100)),
+          reason: asString(mark.reason || mark.evidence)
+        };
+      })
     : [];
+  const allowed = new Set(["Strong Select", "Select", "Maybe", "Reject", "Strong Reject"]);
+  const recommendation = asString(input.recommendation);
   return {
-    candidateName: String(value.candidateName ?? "Unknown candidate"),
-    totalScore: clampScore(value.totalScore),
-    recommendation: allowed.has(String(value.recommendation)) ? value.recommendation as ResumeGrade["recommendation"] : "Maybe",
-    categoryScores,
-    strengths: asStringArray(value.strengths),
-    concerns: asStringArray(value.concerns),
-    missingEvidence: asStringArray(value.missingEvidence),
-    summary: String(value.summary ?? ""),
-    rawNotes: String(value.rawNotes ?? "")
+    name: asString(input.name || input.candidateName || input["Candidate Name"]) || "Unknown candidate",
+    phoneNumber: asString(input.phoneNumber || input.phone || input["Phone Number"]),
+    linkedInUrl: asString(input.linkedInUrl || input.linkedinUrl || input.linkedin || input["LinkedIn URL"]),
+    totalScore: clampScore(input.totalScore || input.score || input["Total Score"]),
+    recommendation: allowed.has(recommendation) ? recommendation as FixedResumeGrade["recommendation"] : "Maybe",
+    subMarks,
+    remarks: {
+      strengths: asStringArray(remarks.strengths || input.strengths),
+      weaknesses: asStringArray(remarks.weaknesses || remarks.concerns || input.weaknesses || input.concerns),
+      selectedOrRejectedReason: asString(remarks.selectedOrRejectedReason || remarks.reason || input.selectedOrRejectedReason || input.reason),
+      missingEvidence: asStringArray(remarks.missingEvidence || input.missingEvidence),
+      risks: asStringArray(remarks.risks || input.risks)
+    },
+    summary: asString(input.summary)
   };
 }
 
-function outputText(payload: { output_text?: string; output?: Array<{ content?: Array<{ text?: string }> }> }) {
-  return payload.output_text ?? payload.output?.flatMap((item) => item.content ?? []).map((part) => part.text ?? "").join("\n") ?? "";
+function extensionFor(fileName: string) {
+  return fileName.toLowerCase().split(".").pop() ?? "";
 }
 
 export async function POST(request: Request) {
@@ -66,15 +99,17 @@ export async function POST(request: Request) {
     const rubric = String(form.get("rubric") ?? "").trim();
     const model = String(form.get("model") ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL;
     const fileName = String(form.get("fileName") ?? "resume.pdf");
+    const extractedText = String(form.get("extractedText") ?? "").trim();
 
     if (!(file instanceof File)) {
-      return NextResponse.json({ error: "Upload one PDF file to grade." }, { status: 400 });
+      return NextResponse.json({ error: "Upload one resume file to grade." }, { status: 400 });
     }
-    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
-      return NextResponse.json({ error: "Only PDF resumes can be graded." }, { status: 400 });
+    const extension = extensionFor(fileName || file.name);
+    if (!SUPPORTED_EXTENSIONS.has(extension)) {
+      return NextResponse.json({ error: "Only PDF, DOC, and DOCX resumes can be graded." }, { status: 400 });
     }
     if (file.size > MAX_PDF_BYTES) {
-      return NextResponse.json({ error: "This PDF is too large for the v1 upload path. Keep files under 3 MB." }, { status: 413 });
+      return NextResponse.json({ error: "This file is too large for the v1 upload path. Keep files under 3 MB." }, { status: 413 });
     }
     if (!rubric) {
       return NextResponse.json({ error: "Add a rubric prompt before grading." }, { status: 400 });
@@ -85,8 +120,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "OPENAI_API_KEY is missing. Add it in Settings or Vercel environment variables." }, { status: 400 });
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const fileData = `data:application/pdf;base64,${buffer.toString("base64")}`;
+    const useExtractedText = extractedText.length >= 500;
     const prompt = `
 You are grading a resume for a recruiting workflow.
 
@@ -95,26 +129,46 @@ ${rubric}
 
 Return only valid JSON with exactly this shape:
 {
-  "candidateName": "string",
+  "name": "string",
+  "phoneNumber": "string",
+  "linkedInUrl": "string",
   "totalScore": 0,
-  "recommendation": "Strong Yes|Yes|Maybe|No|Strong No",
-  "categoryScores": [{"category":"string","score":0,"maxScore":100,"evidence":"string"}],
-  "strengths": ["string"],
-  "concerns": ["string"],
-  "missingEvidence": ["string"],
+  "recommendation": "Strong Select|Select|Maybe|Reject|Strong Reject",
+  "subMarks": [{"section":"string","score":0,"maxScore":100,"reason":"string"}],
+  "remarks": {
+    "strengths": ["string"],
+    "weaknesses": ["string"],
+    "selectedOrRejectedReason": "string",
+    "missingEvidence": ["string"],
+    "risks": ["string"]
+  },
   "summary": "string",
-  "rawNotes": "string"
 }
 
 Rules:
+- Always extract name, phoneNumber, and linkedInUrl when visible in the resume. Use empty string if not found.
 - totalScore must be an integer from 0 to 100.
+- recommendation must be one of the allowed values.
+- subMarks must be quantifiable rubric section marks, not qualitative labels. If the user's rubric has sections, use those section names. If it does not, create 3-5 practical sections from the rubric.
+- remarks.selectedOrRejectedReason must clearly explain why the person was selected/rejected/maybe.
+- remarks must be concise but useful, like neat bullets when rendered in a spreadsheet cell.
 - Use only evidence present in the resume.
-- If a criterion cannot be verified from the PDF, list it in missingEvidence.
+- If a criterion cannot be verified, list it in missingEvidence.
 - Keep notes concise and useful for a recruiter reviewing many resumes.
 - Do not include markdown or commentary outside JSON.
+- Do not wrap the row in an array.
 
 Resume filename: ${fileName}
+${useExtractedText ? `\nResume text extracted locally to reduce cost:\n${extractedText.slice(0, 24000)}` : ""}
 `;
+
+    const content: Array<Record<string, string>> = useExtractedText ? [{ type: "input_text", text: prompt }] : [];
+    if (!useExtractedText) {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const mime = file.type || MIME_BY_EXTENSION[extension] || "application/octet-stream";
+      const fileData = `data:${mime};base64,${buffer.toString("base64")}`;
+      content.push({ type: "input_file", filename: fileName, file_data: fileData }, { type: "input_text", text: prompt });
+    }
 
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -127,10 +181,7 @@ Resume filename: ${fileName}
         input: [
           {
             role: "user",
-            content: [
-              { type: "input_file", filename: fileName, file_data: fileData },
-              { type: "input_text", text: prompt }
-            ]
+            content
           }
         ],
         text: {
@@ -144,7 +195,7 @@ Resume filename: ${fileName}
     }
 
     const payload = await response.json();
-    const parsed = extractJson<Partial<ResumeGrade>>(outputText(payload));
+    const parsed = extractJson<unknown>(outputText(payload));
     return NextResponse.json({ grade: normalizeGrade(parsed), model });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Resume grading failed." }, { status: 400 });

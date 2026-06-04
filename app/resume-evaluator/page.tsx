@@ -6,18 +6,27 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const DB_NAME = "recruno-resume-evaluator";
 const STORE_NAME = "projects";
 const MAX_PDF_BYTES = 3_000_000;
-const DEFAULT_MODEL = "gpt-5.2";
+const DEFAULT_MODEL = "gpt-5.4-mini";
+const DEFAULT_BATCH_SIZE = 10;
+const DEFAULT_SHORTLIST_SCORE = 80;
+const DEFAULT_REJECTION_SCORE = 45;
+const SUPPORTED_EXTENSIONS = new Set(["pdf", "doc", "docx"]);
 
 type Grade = {
-  candidateName: string;
+  name: string;
+  phoneNumber: string;
+  linkedInUrl: string;
   totalScore: number;
-  recommendation: "Strong Yes" | "Yes" | "Maybe" | "No" | "Strong No";
-  categoryScores: Array<{ category: string; score: number; maxScore: number; evidence: string }>;
-  strengths: string[];
-  concerns: string[];
-  missingEvidence: string[];
+  recommendation: "Strong Select" | "Select" | "Maybe" | "Reject" | "Strong Reject";
+  subMarks: Array<{ section: string; score: number; maxScore: number; reason: string }>;
+  remarks: {
+    strengths: string[];
+    weaknesses: string[];
+    selectedOrRejectedReason: string;
+    missingEvidence: string[];
+    risks: string[];
+  };
   summary: string;
-  rawNotes: string;
 };
 
 type ResumeFile = {
@@ -27,6 +36,8 @@ type ResumeFile = {
   source: string;
   status: "queued" | "grading" | "graded" | "failed" | "skipped";
   blob?: Blob;
+  extractedText?: string;
+  extractionMethod?: "docx" | "pdf-best-effort" | "doc-best-effort" | "none";
   error?: string;
   result?: Grade;
   gradedAt?: string;
@@ -37,6 +48,9 @@ type ResumeProject = {
   name: string;
   rubric: string;
   model: string;
+  batchSize: number;
+  shortlistScore: number;
+  rejectionScore: number;
   files: ResumeFile[];
   createdAt: string;
   updatedAt: string;
@@ -65,8 +79,102 @@ function formatBytes(bytes: number) {
 }
 
 function csvEscape(value: unknown) {
-  const text = Array.isArray(value) ? value.join("; ") : String(value ?? "");
+  const text = valueForCell(value);
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function extensionFor(fileName: string) {
+  return fileName.toLowerCase().split(".").pop() ?? "";
+}
+
+function isSupportedResume(fileName: string) {
+  return SUPPORTED_EXTENSIONS.has(extensionFor(fileName));
+}
+
+function decodeXml(text: string) {
+  return text
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanExtractedText(text: string) {
+  return text.replace(/[^\S\r\n]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function decodePdfString(value: string) {
+  return value
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\n")
+    .replace(/\\t/g, " ")
+    .replace(/\\\(/g, "(")
+    .replace(/\\\)/g, ")")
+    .replace(/\\\\/g, "\\");
+}
+
+async function extractResumeText(blob: Blob, fileName: string): Promise<{ text: string; method: ResumeFile["extractionMethod"] }> {
+  const extension = extensionFor(fileName);
+  try {
+    if (extension === "docx") {
+      const zip = await JSZip.loadAsync(blob);
+      const documentXml = await zip.file("word/document.xml")?.async("text");
+      if (documentXml) return { text: cleanExtractedText(decodeXml(documentXml)), method: "docx" };
+    }
+    const buffer = await blob.arrayBuffer();
+    const raw = new TextDecoder("latin1").decode(buffer);
+    if (extension === "pdf") {
+      const chunks = [
+        ...Array.from(raw.matchAll(/\(([^()]|\\[()nrt\\]){2,}\)\s*Tj/g)).map((match) => decodePdfString(match[0].replace(/\)\s*Tj$/, "").slice(1))),
+        ...Array.from(raw.matchAll(/\[((?:\s*\((?:[^()]|\\[()nrt\\]){1,}\)\s*)+)\]\s*TJ/g)).map((match) =>
+          Array.from(match[1].matchAll(/\(([^()]|\\[()nrt\\]){1,}\)/g)).map((item) => decodePdfString(item[0].slice(1, -1))).join(" ")
+        )
+      ];
+      return { text: cleanExtractedText(chunks.join("\n")), method: chunks.length ? "pdf-best-effort" : "none" };
+    }
+    if (extension === "doc") {
+      return { text: cleanExtractedText(raw.replace(/\0/g, " ").replace(/[^\x20-\x7E\r\n\t]+/g, " ")), method: "doc-best-effort" };
+    }
+  } catch {
+    return { text: "", method: "none" };
+  }
+  return { text: "", method: "none" };
+}
+
+function valueForCell(value: unknown): string {
+  if (Array.isArray(value)) return value.map(valueForCell).filter(Boolean).join("; ");
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return String(value ?? "");
+}
+
+function formatSubMarks(value: Grade["subMarks"] | undefined) {
+  return (value ?? []).map((item) => `${item.section}: ${item.score}/${item.maxScore} - ${item.reason}`).join("\n");
+}
+
+function formatRemarks(grade: Grade | undefined) {
+  if (!grade) return "";
+  const sections = [
+    ["Strengths", grade.remarks?.strengths],
+    ["Weaknesses", grade.remarks?.weaknesses],
+    ["Reason", grade.remarks?.selectedOrRejectedReason ? [grade.remarks.selectedOrRejectedReason] : []],
+    ["Missing Evidence", grade.remarks?.missingEvidence],
+    ["Risks", grade.remarks?.risks]
+  ] as const;
+  return sections
+    .map(([label, items]) => (items ?? []).length ? `${label}:\n${(items ?? []).map((item) => `- ${item}`).join("\n")}` : "")
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function decisionBand(score: number | undefined, project: Pick<ResumeProject, "shortlistScore" | "rejectionScore">) {
+  if (typeof score !== "number") return "";
+  if (score >= project.shortlistScore) return "Shortlist";
+  if (score <= project.rejectionScore) return "Reject";
+  return "Review";
 }
 
 function rowsForExport(project: ResumeProject) {
@@ -74,15 +182,16 @@ function rowsForExport(project: ResumeProject) {
     .filter((file) => file.result)
     .map((file) => ({
       "File Name": file.fileName,
-      "Candidate Name": file.result?.candidateName ?? "",
+      Name: file.result?.name ?? "",
+      "Phone Number": file.result?.phoneNumber ?? "",
+      "LinkedIn URL": file.result?.linkedInUrl ?? "",
       "Total Score": file.result?.totalScore ?? "",
+      "Decision Band": decisionBand(file.result?.totalScore, project),
       Recommendation: file.result?.recommendation ?? "",
-      "Category Scores": file.result?.categoryScores.map((item) => `${item.category}: ${item.score}/${item.maxScore} - ${item.evidence}`).join("; ") ?? "",
-      Strengths: file.result?.strengths.join("; ") ?? "",
-      Concerns: file.result?.concerns.join("; ") ?? "",
-      "Missing Evidence": file.result?.missingEvidence.join("; ") ?? "",
+      "Sub Marks": formatSubMarks(file.result?.subMarks),
+      Remarks: formatRemarks(file.result),
       Summary: file.result?.summary ?? "",
-      "Raw Notes": file.result?.rawNotes ?? "",
+      "Text Extraction": file.extractionMethod ?? "",
       "Graded Timestamp": file.gradedAt ?? ""
     }));
 }
@@ -128,7 +237,18 @@ async function removeProject(idValue: string) {
 
 function newProject(name = "Resume Screening Project"): ResumeProject {
   const now = new Date().toISOString();
-  return { id: id("project"), name, rubric: DEFAULT_RUBRIC, model: DEFAULT_MODEL, files: [], createdAt: now, updatedAt: now };
+  return {
+    id: id("project"),
+    name,
+    rubric: DEFAULT_RUBRIC,
+    model: DEFAULT_MODEL,
+    batchSize: DEFAULT_BATCH_SIZE,
+    shortlistScore: DEFAULT_SHORTLIST_SCORE,
+    rejectionScore: DEFAULT_REJECTION_SCORE,
+    files: [],
+    createdAt: now,
+    updatedAt: now
+  };
 }
 
 export default function ResumeEvaluatorPage() {
@@ -138,13 +258,17 @@ export default function ResumeEvaluatorPage() {
   const [message, setMessage] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const stopRequestedRef = useRef(false);
+  const controllersRef = useRef<Set<AbortController>>(new Set());
 
   const activeProject = useMemo(() => projects.find((project) => project.id === activeId) ?? projects[0], [activeId, projects]);
   const gradedCount = activeProject?.files.filter((file) => file.status === "graded").length ?? 0;
   const queuedCount = activeProject?.files.filter((file) => file.status === "queued").length ?? 0;
   const failedCount = activeProject?.files.filter((file) => file.status === "failed").length ?? 0;
   const averageScore = useMemo(() => {
-    const scores = activeProject?.files.map((file) => file.result?.totalScore).filter((score): score is number => typeof score === "number") ?? [];
+    const scores = activeProject?.files
+      .map((file) => Number(file.result?.totalScore))
+      .filter((score) => Number.isFinite(score)) ?? [];
     return scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0;
   }, [activeProject]);
 
@@ -153,7 +277,17 @@ export default function ResumeEvaluatorPage() {
     listProjects()
       .then(async (stored) => {
         if (!mounted) return;
-        const next = stored.length ? stored.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) : [newProject()];
+        const next = stored.length
+          ? stored
+              .map((project) => ({
+                ...project,
+                model: project.model || DEFAULT_MODEL,
+                batchSize: project.batchSize || DEFAULT_BATCH_SIZE,
+                shortlistScore: project.shortlistScore || DEFAULT_SHORTLIST_SCORE,
+                rejectionScore: project.rejectionScore || DEFAULT_REJECTION_SCORE
+              }))
+              .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          : [newProject()];
         if (!stored.length) await saveProject(next[0]);
         setProjects(next);
         setActiveId(next[0].id);
@@ -214,6 +348,12 @@ export default function ResumeEvaluatorPage() {
     setActiveId(copy.id);
   }
 
+  function handleRenameProject() {
+    if (!activeProject) return;
+    const nextName = window.prompt("Rename project", activeProject.name);
+    if (nextName?.trim()) updateActiveProject({ name: nextName.trim() });
+  }
+
   async function handleDeleteProject() {
     if (!activeProject || projects.length <= 1) return;
     await removeProject(activeProject.id);
@@ -229,19 +369,22 @@ export default function ResumeEvaluatorPage() {
     for (const entry of entries) {
       if (entry.dir) continue;
       const name = entry.name.split("/").pop() || entry.name;
-      if (!name.toLowerCase().endsWith(".pdf")) {
-        resumeFiles.push({ id: id("file"), fileName: name, size: 0, source: file.name, status: "skipped", error: "Not a PDF file." });
+      if (!isSupportedResume(name)) {
+        resumeFiles.push({ id: id("file"), fileName: name, size: 0, source: file.name, status: "skipped", error: "Not a PDF, DOC, or DOCX file." });
         continue;
       }
       const blob = await entry.async("blob");
+      const extracted = await extractResumeText(blob, name);
       resumeFiles.push({
         id: id("file"),
         fileName: name,
         size: blob.size,
         source: file.name,
         status: blob.size > MAX_PDF_BYTES ? "failed" : "queued",
-        error: blob.size > MAX_PDF_BYTES ? "PDF is over the 3 MB v1 upload limit." : undefined,
-        blob
+        error: blob.size > MAX_PDF_BYTES ? "File is over the 3 MB v1 upload limit." : undefined,
+        blob,
+        extractedText: extracted.text,
+        extractionMethod: extracted.method
       });
     }
     return resumeFiles;
@@ -254,32 +397,35 @@ export default function ResumeEvaluatorPage() {
     for (const file of Array.from(files)) {
       if (file.name.toLowerCase().endsWith(".zip")) {
         collected.push(...await filesFromZip(file));
-      } else if (file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf") {
+      } else if (isSupportedResume(file.name)) {
+        const extracted = await extractResumeText(file, file.name);
         collected.push({
           id: id("file"),
           fileName: file.name,
           size: file.size,
           source: "direct upload",
           status: file.size > MAX_PDF_BYTES ? "failed" : "queued",
-          error: file.size > MAX_PDF_BYTES ? "PDF is over the 3 MB v1 upload limit." : undefined,
-          blob: file
+          error: file.size > MAX_PDF_BYTES ? "File is over the 3 MB v1 upload limit." : undefined,
+          blob: file,
+          extractedText: extracted.text,
+          extractionMethod: extracted.method
         });
       } else {
-        collected.push({ id: id("file"), fileName: file.name, size: file.size, source: "direct upload", status: "skipped", error: "Not a PDF file." });
+        collected.push({ id: id("file"), fileName: file.name, size: file.size, source: "direct upload", status: "skipped", error: "Not a PDF, DOC, or DOCX file." });
       }
     }
     updateActiveProject({ files: [...collected, ...activeProject.files] });
-    setMessage(`Added ${collected.filter((file) => file.status === "queued").length} PDF resumes to the queue.`);
+    setMessage(`Added ${collected.filter((file) => file.status === "queued").length} resumes to the queue.`);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  async function gradeFile(projectId: string, file: ResumeFile, rubric: string, model: string) {
+  async function gradeFile(projectId: string, file: ResumeFile, rubric: string, model: string, signal?: AbortSignal) {
     if (!file.blob) {
-      updateFile(projectId, file.id, { status: "failed", error: "Original PDF data is missing. Re-upload this file." });
+      updateFile(projectId, file.id, { status: "failed", error: "Original file data is missing. Re-upload this file." });
       return;
     }
     if (file.blob.size > MAX_PDF_BYTES) {
-      updateFile(projectId, file.id, { status: "failed", error: "PDF is over the 3 MB v1 upload limit." });
+      updateFile(projectId, file.id, { status: "failed", error: "File is over the 3 MB v1 upload limit." });
       return;
     }
     updateFile(projectId, file.id, { status: "grading", error: undefined });
@@ -288,7 +434,8 @@ export default function ResumeEvaluatorPage() {
     form.append("fileName", file.fileName);
     form.append("rubric", rubric);
     form.append("model", model || DEFAULT_MODEL);
-    const response = await fetch("/api/resume-evaluator/grade", { method: "POST", body: form });
+    if (file.extractedText) form.append("extractedText", file.extractedText);
+    const response = await fetch("/api/resume-evaluator/grade", { method: "POST", body: form, signal });
     const json = await response.json().catch(() => ({}));
     if (!response.ok) {
       updateFile(projectId, file.id, { status: "failed", error: json.error || "Grading failed." });
@@ -300,22 +447,68 @@ export default function ResumeEvaluatorPage() {
   async function handleGradeOne(file: ResumeFile) {
     if (!activeProject) return;
     setIsRunning(true);
+    stopRequestedRef.current = false;
+    const controller = new AbortController();
+    controllersRef.current.add(controller);
     setMessage(`Grading ${file.fileName}...`);
-    await gradeFile(activeProject.id, file, activeProject.rubric, activeProject.model);
-    setMessage(`Finished ${file.fileName}.`);
+    try {
+      await gradeFile(activeProject.id, file, activeProject.rubric, activeProject.model, controller.signal);
+      setMessage(`Finished ${file.fileName}.`);
+    } catch (error) {
+      updateFile(activeProject.id, file.id, { status: "queued", error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Grading failed." });
+    } finally {
+      controllersRef.current.delete(controller);
+    }
     setIsRunning(false);
   }
 
   async function handleGradeAll() {
     if (!activeProject) return;
     setIsRunning(true);
+    stopRequestedRef.current = false;
     const queue = activeProject.files.filter((file) => (file.status === "queued" || file.status === "failed") && file.blob);
-    for (const file of queue) {
-      setMessage(`Grading ${file.fileName}...`);
-      await gradeFile(activeProject.id, file, activeProject.rubric, activeProject.model);
+    const concurrency = Math.max(1, Math.min(25, Math.floor(Number(activeProject.batchSize || DEFAULT_BATCH_SIZE))));
+    let cursor = 0;
+    let completed = 0;
+    setMessage(`Grading ${queue.length} resumes with ${concurrency} parallel request${concurrency === 1 ? "" : "s"}...`);
+    async function worker() {
+      while (!stopRequestedRef.current) {
+        const file = queue[cursor];
+        cursor += 1;
+        if (!file) return;
+        const controller = new AbortController();
+        controllersRef.current.add(controller);
+        try {
+          await gradeFile(activeProject.id, file, activeProject.rubric, activeProject.model, controller.signal);
+          completed += 1;
+          setMessage(`Graded ${completed}/${queue.length}. Running up to ${concurrency} at a time.`);
+        } catch (error) {
+          updateFile(activeProject.id, file.id, {
+            status: "queued",
+            error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Grading failed."
+          });
+        } finally {
+          controllersRef.current.delete(controller);
+        }
+      }
     }
-    setMessage(`Finished grading ${queue.length} resume${queue.length === 1 ? "" : "s"}.`);
+    await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()));
+    setMessage(stopRequestedRef.current ? `Stopped grading. Completed ${completed}/${queue.length}; remaining files stayed queued.` : `Finished grading ${queue.length} resume${queue.length === 1 ? "" : "s"}.`);
+    stopRequestedRef.current = false;
     setIsRunning(false);
+  }
+
+  function terminateGrading() {
+    stopRequestedRef.current = true;
+    controllersRef.current.forEach((controller) => controller.abort());
+    controllersRef.current.clear();
+    if (activeProject) {
+      updateActiveProject({
+        files: activeProject.files.map((file) => file.status === "grading" ? { ...file, status: "queued", error: "Stopped before completion." } : file)
+      });
+    }
+    setIsRunning(false);
+    setMessage("Stop requested. In-flight grading requests are being cancelled.");
   }
 
   function clearResults() {
@@ -406,9 +599,10 @@ export default function ResumeEvaluatorPage() {
                   onChange={(event) => updateActiveProject({ name: event.target.value })}
                   aria-label="Project name"
                 />
-                <p>Upload local PDFs or a zip, tune the rubric, grade each resume, then export the sheet.</p>
+                <p>Upload local resumes or a zip, tune the rubric, grade in parallel, then export the sheet.</p>
               </div>
               <div className="resume-actions">
+                <button className="resume-button" onClick={handleRenameProject}>Rename</button>
                 <button className="resume-button" onClick={handleDuplicateProject}>Duplicate</button>
                 <button className="resume-button danger" disabled={projects.length <= 1} onClick={handleDeleteProject}>Delete</button>
               </div>
@@ -424,12 +618,36 @@ export default function ResumeEvaluatorPage() {
               <div><strong>{averageScore || "-"}</strong><span>Avg score</span></div>
             </div>
 
+            <div className="resume-thresholds">
+              <label>
+                <span>Shortlist score</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={activeProject.shortlistScore || DEFAULT_SHORTLIST_SCORE}
+                  onChange={(event) => updateActiveProject({ shortlistScore: Math.max(0, Math.min(100, Number(event.target.value) || DEFAULT_SHORTLIST_SCORE)) })}
+                />
+              </label>
+              <label>
+                <span>Reject score</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={activeProject.rejectionScore || DEFAULT_REJECTION_SCORE}
+                  onChange={(event) => updateActiveProject({ rejectionScore: Math.max(0, Math.min(100, Number(event.target.value) || DEFAULT_REJECTION_SCORE)) })}
+                />
+              </label>
+              <p>Scores at or above shortlist are best set. Scores at or below reject are worst set. Everything between is review.</p>
+            </div>
+
             <div className="resume-grid">
               <section className="resume-panel">
                 <div className="resume-section-head">
                   <div>
                     <h2>Rubric / grading scheme</h2>
-                    <p>Each project keeps its own prompt and model setting.</p>
+                    <p>Required columns are always enforced. Use the rubric only to change scoring priorities.</p>
                   </div>
                   <label>
                     <span>Model</span>
@@ -448,18 +666,32 @@ export default function ResumeEvaluatorPage() {
                 <div className="resume-section-head">
                   <div>
                     <h2>Upload resumes</h2>
-                    <p>Zip files are unpacked in the browser. PDFs over {formatBytes(MAX_PDF_BYTES)} are held for review.</p>
+                    <p>Zip files are unpacked in the browser. PDF, DOC, and DOCX files over {formatBytes(MAX_PDF_BYTES)} are held for review.</p>
                   </div>
                 </div>
                 <label className="resume-dropzone">
-                  <input ref={fileInputRef} type="file" multiple accept=".pdf,.zip,application/pdf,application/zip" onChange={(event) => void handleFiles(event.target.files)} />
-                  <strong>Add PDFs or zip</strong>
-                  <span>Local files stay in this browser until each PDF is sent for grading.</span>
+                  <input ref={fileInputRef} type="file" multiple accept=".pdf,.doc,.docx,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip" onChange={(event) => void handleFiles(event.target.files)} />
+                  <strong>Add resumes or zip</strong>
+                  <span>Local files stay in this browser until each resume is sent for grading.</span>
                 </label>
+                <div className="resume-run-settings">
+                  <label>
+                    <span>Parallel batch size</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={25}
+                      value={activeProject.batchSize || DEFAULT_BATCH_SIZE}
+                      onChange={(event) => updateActiveProject({ batchSize: Math.max(1, Math.min(25, Number(event.target.value) || DEFAULT_BATCH_SIZE)) })}
+                    />
+                  </label>
+                  <p>Use 10 for 100-150 resumes. Lower it if OpenAI rate limits or Vercel times out.</p>
+                </div>
                 <div className="resume-actions">
-                  <button className="resume-button primary" disabled={isRunning || !activeProject.files.some((file) => file.status === "queued" && file.blob)} onClick={() => void handleGradeAll()}>
-                    Grade Queue
+                  <button className="resume-button primary" disabled={isRunning || !activeProject.files.some((file) => (file.status === "queued" || file.status === "failed") && file.blob)} onClick={() => void handleGradeAll()}>
+                    Grade Queue ({activeProject.batchSize || DEFAULT_BATCH_SIZE} at a time)
                   </button>
+                  <button className="resume-button danger" disabled={!isRunning} onClick={terminateGrading}>Stop Grading</button>
                   <button className="resume-button" disabled={isRunning || !activeProject.files.length} onClick={clearResults}>Reset Results</button>
                   <button className="resume-button" disabled={!gradedCount} onClick={() => void downloadXlsx()}>Download XLSX</button>
                   <button className="resume-button" disabled={!gradedCount} onClick={() => void downloadCsv()}>CSV</button>
@@ -482,10 +714,13 @@ export default function ResumeEvaluatorPage() {
                       <th>File</th>
                       <th>Status</th>
                       <th>Candidate</th>
+                      <th>Phone</th>
+                      <th>LinkedIn</th>
                       <th>Score</th>
+                      <th>Band</th>
                       <th>Recommendation</th>
-                      <th>Summary</th>
-                      <th>Concerns / missing evidence</th>
+                      <th>Sub marks</th>
+                      <th>Remarks</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
@@ -497,11 +732,14 @@ export default function ResumeEvaluatorPage() {
                           <span>{formatBytes(file.size)} · {file.source}</span>
                         </td>
                         <td><span className={`resume-status ${file.status}`}>{file.status}</span>{file.error ? <em>{file.error}</em> : null}</td>
-                        <td>{file.result?.candidateName ?? "-"}</td>
+                        <td>{file.result?.name || "-"}</td>
+                        <td>{file.result?.phoneNumber || "-"}</td>
+                        <td className="resume-long">{file.result?.linkedInUrl || "-"}</td>
                         <td>{file.result?.totalScore ?? "-"}</td>
-                        <td>{file.result?.recommendation ?? "-"}</td>
-                        <td className="resume-long">{file.result?.summary ?? "-"}</td>
-                        <td className="resume-long">{[...(file.result?.concerns ?? []), ...(file.result?.missingEvidence ?? [])].join("; ") || "-"}</td>
+                        <td>{file.result ? decisionBand(file.result.totalScore, activeProject) : "-"}</td>
+                        <td>{file.result?.recommendation || "-"}</td>
+                        <td className="resume-long">{formatSubMarks(file.result?.subMarks) || "-"}</td>
+                        <td className="resume-long">{formatRemarks(file.result) || "-"}</td>
                         <td>
                           <div className="resume-row-actions">
                             <button className="resume-button small" disabled={isRunning || !file.blob} onClick={() => void handleGradeOne(file)}>Grade</button>
@@ -511,7 +749,7 @@ export default function ResumeEvaluatorPage() {
                       </tr>
                     )) : (
                       <tr>
-                        <td colSpan={8} className="resume-empty">No resumes yet. Add PDFs or a zip file to start grading.</td>
+                        <td colSpan={11} className="resume-empty">No resumes yet. Add PDF, DOC, DOCX, or a zip file to start grading.</td>
                       </tr>
                     )}
                   </tbody>

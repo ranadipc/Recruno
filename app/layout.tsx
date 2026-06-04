@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Recruno Automated Leads",
+  title: "Recruno",
   description: "Local-first LinkedIn fit scoring sourcing workflow"
 };
 
