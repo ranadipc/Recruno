@@ -57,9 +57,8 @@ function clampScore(value: unknown, fallback = 0) {
 
 function normalizeIndianPhone(value: unknown) {
   let phone = asString(value);
-  phone = phone.replace(/^\s*(?:\+?91|0091)[\s-]*/i, "");
+  phone = phone.replace(/^\s*(?:\+{1,2}91|0091)[\s-]*/i, "");
   phone = phone.replace(/[^\d]/g, "");
-  if (phone.length > 10 && phone.startsWith("91")) phone = phone.slice(2);
   return phone;
 }
 
