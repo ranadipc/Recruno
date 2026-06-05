@@ -16,6 +16,7 @@ const SUPPORTED_EXTENSIONS = new Set(["pdf", "doc", "docx"]);
 type Grade = {
   name: string;
   phoneNumber: string;
+  email: string;
   linkedInUrl: string;
   totalScore: number;
   recommendation: "Strong Select" | "Select" | "Maybe" | "Reject" | "Strong Reject";
@@ -197,6 +198,7 @@ function rowsForExport(project: ResumeProject) {
       "File Name": file.fileName,
       Name: file.result?.name ?? "",
       "Phone Number": file.result?.phoneNumber ?? "",
+      Email: file.result?.email ?? "",
       "Total Score": file.result?.totalScore ?? "",
       "LinkedIn URL": file.result?.linkedInUrl ?? "",
       "Decision Band": decisionBand(file.result?.totalScore, project),
@@ -764,8 +766,9 @@ export default function ResumeEvaluatorPage() {
                       <th>Status</th>
                       <th>Candidate</th>
                       <th>Phone</th>
-                      <th>LinkedIn</th>
+                      <th>Email</th>
                       <th>Score</th>
+                      <th>LinkedIn</th>
                       <th>Band</th>
                       <th>Recommendation</th>
                       <th>Sub marks</th>
@@ -783,8 +786,9 @@ export default function ResumeEvaluatorPage() {
                         <td><span className={`resume-status ${file.status}`}>{file.status}</span>{file.error ? <em>{file.error}</em> : null}</td>
                         <td>{file.result?.name || "-"}</td>
                         <td>{file.result?.phoneNumber || "-"}</td>
-                        <td className="resume-long">{file.result?.linkedInUrl || "-"}</td>
+                        <td className="resume-long">{file.result?.email || "-"}</td>
                         <td>{file.result?.totalScore ?? "-"}</td>
+                        <td className="resume-long">{file.result?.linkedInUrl || "-"}</td>
                         <td>{file.result ? decisionBand(file.result.totalScore, activeProject) : "-"}</td>
                         <td>{file.result?.recommendation || "-"}</td>
                         <td className="resume-long">{formatSubMarks(file.result?.subMarks) || "-"}</td>

@@ -14,6 +14,7 @@ type ResumeGrade = Record<string, unknown>;
 type FixedResumeGrade = {
   name: string;
   phoneNumber: string;
+  email: string;
   linkedInUrl: string;
   totalScore: number;
   recommendation: "Strong Select" | "Select" | "Maybe" | "Reject" | "Strong Reject";
@@ -81,6 +82,7 @@ function normalizeGrade(value: unknown): FixedResumeGrade {
   return {
     name: asString(input.name || input.candidateName || input["Candidate Name"]) || "Unknown candidate",
     phoneNumber: normalizeIndianPhone(input.phoneNumber || input.phone || input["Phone Number"]),
+    email: asString(input.email || input.emailAddress || input["Email"]),
     linkedInUrl: asString(input.linkedInUrl || input.linkedinUrl || input.linkedin || input["LinkedIn URL"]),
     totalScore: clampScore(input.totalScore || input.score || input["Total Score"]),
     recommendation: allowed.has(recommendation) ? recommendation as FixedResumeGrade["recommendation"] : "Maybe",
@@ -143,6 +145,7 @@ Return only valid JSON with exactly this shape:
 {
   "name": "string",
   "phoneNumber": "string",
+  "email": "string",
   "linkedInUrl": "string",
   "totalScore": 0,
   "recommendation": "Strong Select|Select|Maybe|Reject|Strong Reject",
@@ -158,7 +161,7 @@ Return only valid JSON with exactly this shape:
 }
 
 Rules:
-- Always extract name, phoneNumber, and linkedInUrl when visible in the resume. Use empty string if not found.
+- Always extract name, phoneNumber, email, and linkedInUrl when visible in the resume. Use empty string if not found.
 - For Indian phone numbers, remove the country code. If the resume says "+91 9999999999", phoneNumber must be "9999999999". Do not include leading +, =, spaces, or country code in phoneNumber.
 - totalScore must be an integer from 0 to 100.
 - recommendation must be one of the allowed values.
