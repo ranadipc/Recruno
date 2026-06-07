@@ -147,6 +147,10 @@ td input, td select, td textarea { min-width: 112px; font-size: 13px; }
 .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .tabs button { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 7px 12px; cursor: pointer; text-transform: capitalize; }
 .tabs button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.apify-mode-tabs { margin: 18px 0; }
+.apify-input-mode { border-top: 1px solid var(--line); padding-top: 18px; }
+.compact-heading { margin-bottom: 14px; }
+.compact-heading p { margin: 5px 0 0; }
 .filters label { min-width: 190px; }
 .final-tools { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: end; }
 .inline-check, .switch-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted); }

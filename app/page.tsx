@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ApolloTierSelection, AppState, Candidate, ProfileFilters, PublicSettings, Query, QueryType, SavedWorkflow, Tier, WorkflowSettings } from "@/lib/types";
 import { DEFAULT_APOLLO_TIERS, DEFAULT_WORKFLOW } from "@/lib/defaults";
+import { normalizeLinkedInUrl } from "@/lib/utils";
 
 const steps = [
   "Setup + API Keys",
@@ -259,6 +260,8 @@ export default function Home() {
   const [runSettings, setRunSettings] = useState({ pagesPerQuery: 2, startOffset: 0, delayMs: 0, location: "India", targetCountry: "India", strictIndiaOnly: true, keepUnknownLocation: true });
   const [scoreSettings, setScoreSettings] = useState({ maxCandidates: 50, onlyScraped: true });
   const [apifyBatchSize, setApifyBatchSize] = useState(DEFAULT_WORKFLOW.maxProfilesToApify);
+  const [apifyMode, setApifyMode] = useState<"shortlist" | "links">("shortlist");
+  const [apifyLinksText, setApifyLinksText] = useState("");
   const [profileFilterForm, setProfileFilterForm] = useState<ProfileFilters>({
     actual_location_must_include: [],
     current_title_must_include: [],
@@ -400,6 +403,21 @@ export default function Home() {
   const foundPhones = shortlistedCandidates.filter((candidate) => candidate.phone).length;
   const isOneClick = activeStep === 12;
   const oneClickCandidates = state.oneClick.candidates.filter((candidate) => candidate.normalized_linkedin_url.startsWith("linkedin.com/in/"));
+  const apifyInputSummary = useMemo(() => {
+    const tokens = apifyLinksText.split(/[\s,;]+/).map((item) => item.trim()).filter(Boolean);
+    const normalized = tokens.map((original) => ({ original, normalized: normalizeLinkedInUrl(original) }));
+    const validRows = normalized.filter((item): item is { original: string; normalized: string } => Boolean(item.normalized?.startsWith("linkedin.com/in/")));
+    const validUrls = Array.from(new Set(validRows.map((item) => item.normalized)));
+    return {
+      validUrls,
+      invalid: normalized.length - validRows.length,
+      duplicates: validRows.length - validUrls.length
+    };
+  }, [apifyLinksText]);
+  const manualInputCandidates = useMemo(() => {
+    const urls = new Set(apifyInputSummary.validUrls);
+    return state.candidates.filter((candidate) => urls.has(candidate.normalized_linkedin_url));
+  }, [apifyInputSummary.validUrls, state.candidates]);
 
   function openPromptEditor(kind: PromptKind) {
     setPromptEditor(kind);
@@ -536,6 +554,14 @@ export default function Home() {
     });
     commitState(next, { reason: "apify scrape" });
     await refresh(true);
+  }
+
+  async function scrapeInputLinksWithApify() {
+    const next = await api<AppState>("/api/apify/run", {
+      method: "POST",
+      body: JSON.stringify({ manualLinks: apifyInputSummary.validUrls })
+    });
+    commitState(next, { allowWeaker: true, reason: "apify input links" });
   }
 
   return (
@@ -736,16 +762,53 @@ export default function Home() {
         {activeStep === 6 && (
           <section className="panel simple">
             <div className="section-heading"><h3>Pull visible LinkedIn profile data</h3><p>Apify data enriches the existing SerpAPI evidence. Visibility and matched queries are preserved.</p></div>
-            <div className="summary-cards"><Metric label="Shortlisted candidates" value={shortlistedCandidates.length} /><Metric label="Pending Apify" value={apifyPendingCount} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Apify failed" value={apifyFailCount} /></div>
-            <div className="run-settings compact-settings">
-              <label><span>Apify batch size</span><input type="number" min={1} value={apifyBatchSize} onChange={(event) => setApifyBatchSize(Math.max(1, Number(event.target.value || 1)))} /></label>
-              <div className="estimate">Next batch will run <strong>{Math.min(apifyBatchSize, apifyPendingCount)}</strong> pending profiles. Run all will process <strong>{apifyPendingCount}</strong>.</div>
+            <div className="tabs apify-mode-tabs" role="tablist" aria-label="Apify input method">
+              <button className={apifyMode === "shortlist" ? "active" : ""} onClick={() => setApifyMode("shortlist")}>Workflow shortlist</button>
+              <button className={apifyMode === "links" ? "active" : ""} onClick={() => setApifyMode("links")}>Input links</button>
             </div>
-            <div className="actions">
-              <SmallButton variant="primary" disabled={apifyPendingCount === 0} onClick={() => runAction(`Scrape next ${Math.min(apifyBatchSize, apifyPendingCount)} profiles with Apify`, () => scrapeProfilesWithApify(false))}>Scrape Next Batch</SmallButton>
-              <SmallButton disabled={apifyPendingCount === 0} onClick={() => runAction("Scrape all remaining profiles with Apify", () => scrapeProfilesWithApify(true))}>Scrape All Remaining</SmallButton>
-            </div>
-            <ApifyProfileTable candidates={shortlistedCandidates} onEvidence={setEvidenceCandidate} />
+
+            {apifyMode === "shortlist" ? (
+              <>
+                <div className="summary-cards"><Metric label="Shortlisted candidates" value={shortlistedCandidates.length} /><Metric label="Pending Apify" value={apifyPendingCount} /><Metric label="Apify success" value={apifySuccessCount} /><Metric label="Apify failed" value={apifyFailCount} /></div>
+                <div className="run-settings compact-settings">
+                  <label><span>Apify batch size</span><input type="number" min={1} value={apifyBatchSize} onChange={(event) => setApifyBatchSize(Math.max(1, Number(event.target.value || 1)))} /></label>
+                  <div className="estimate">Next batch will run <strong>{Math.min(apifyBatchSize, apifyPendingCount)}</strong> pending profiles. Run all will process <strong>{apifyPendingCount}</strong>.</div>
+                </div>
+                <div className="actions">
+                  <SmallButton variant="primary" disabled={apifyPendingCount === 0} onClick={() => runAction(`Scrape next ${Math.min(apifyBatchSize, apifyPendingCount)} profiles with Apify`, () => scrapeProfilesWithApify(false))}>Scrape Next Batch</SmallButton>
+                  <SmallButton disabled={apifyPendingCount === 0} onClick={() => runAction("Scrape all remaining profiles with Apify", () => scrapeProfilesWithApify(true))}>Scrape All Remaining</SmallButton>
+                </div>
+                <ApifyProfileTable candidates={shortlistedCandidates} onEvidence={setEvidenceCandidate} />
+              </>
+            ) : (
+              <div className="apify-input-mode">
+                <div className="section-heading compact-heading">
+                  <h3>Scrape pasted LinkedIn profiles</h3>
+                  <p>This runs independently of SerpAPI and Clean + Dedupe. Only valid <code>linkedin.com/in</code> profile links are sent to Apify.</p>
+                </div>
+                <label className="field">
+                  <span>LinkedIn profile links</span>
+                  <textarea
+                    value={apifyLinksText}
+                    onChange={(event) => setApifyLinksText(event.target.value)}
+                    rows={8}
+                    placeholder={"https://www.linkedin.com/in/profile-one\nhttps://www.linkedin.com/in/profile-two"}
+                  />
+                </label>
+                <div className="summary-cards">
+                  <Metric label="Valid unique links" value={apifyInputSummary.validUrls.length} />
+                  <Metric label="Invalid or non-profile" value={apifyInputSummary.invalid} />
+                  <Metric label="Duplicates removed" value={apifyInputSummary.duplicates} />
+                  <Metric label="Already in workflow" value={manualInputCandidates.length} />
+                </div>
+                <div className="actions">
+                  <SmallButton variant="primary" disabled={apifyInputSummary.validUrls.length === 0 || Boolean(busy)} onClick={() => runAction(`Scrape ${apifyInputSummary.validUrls.length} pasted links with Apify`, scrapeInputLinksWithApify)}>Scrape Input Links</SmallButton>
+                  <SmallButton disabled={!apifyLinksText || Boolean(busy)} onClick={() => setApifyLinksText("")}>Clear Links</SmallButton>
+                </div>
+                {apifyInputSummary.invalid > 0 && <div className="empty-state">Skipped {apifyInputSummary.invalid} invalid link{apifyInputSummary.invalid === 1 ? "" : "s"}. Use complete LinkedIn profile URLs containing <code>linkedin.com/in/</code>.</div>}
+                {manualInputCandidates.length > 0 ? <ApifyProfileTable candidates={manualInputCandidates} onEvidence={setEvidenceCandidate} /> : <div className="empty-state">Paste profile links and run Apify. Results will appear here without requiring SerpAPI or Clean Data.</div>}
+              </div>
+            )}
           </section>
         )}
 
