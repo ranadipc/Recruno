@@ -159,6 +159,11 @@ export default function InterviewEvaluatorPage() {
       .filter((candidate) => candidate.saved && candidate.result)
       .sort((a, b) => (b.result?.totalScore ?? 0) - (a.result?.totalScore ?? 0));
   }, [activeProject]);
+  const evaluatedCandidates = useMemo(() => {
+    return (activeProject?.candidates ?? [])
+      .filter((candidate) => candidate.result)
+      .sort((a, b) => (b.result?.totalScore ?? 0) - (a.result?.totalScore ?? 0));
+  }, [activeProject]);
   const evaluatedCount = activeProject?.candidates.filter((candidate) => candidate.status === "evaluated").length ?? 0;
   const queuedCount = activeProject?.candidates.filter((candidate) => candidate.status === "queued" || candidate.status === "failed" || candidate.status === "draft").length ?? 0;
   const averageScore = useMemo(() => {
@@ -196,12 +201,20 @@ export default function InterviewEvaluatorPage() {
   }
 
   function updateCandidate(candidateId: string, patch: Partial<Candidate>) {
-    if (!activeProject) return;
-    const next = {
-      ...activeProject,
-      candidates: activeProject.candidates.map((candidate) => candidate.id === candidateId ? { ...candidate, ...patch } : candidate)
-    };
-    commitProject(next);
+    const projectId = activeId;
+    setProjects((current) => {
+      const nextProjects = current.map((project) => {
+        if (project.id !== projectId) return project;
+        const nextProject = {
+          ...project,
+          updatedAt: new Date().toISOString(),
+          candidates: project.candidates.map((candidate) => candidate.id === candidateId ? { ...candidate, ...patch } : candidate)
+        };
+        void saveProject(nextProject).catch((error) => setMessage(error instanceof Error ? error.message : "Could not save candidate."));
+        return nextProject;
+      });
+      return nextProjects;
+    });
   }
 
   async function handleCreateProject() {
@@ -286,6 +299,7 @@ export default function InterviewEvaluatorPage() {
     updateCandidate(candidate.id, {
       name: json.evaluation?.candidateName || candidate.name,
       status: "evaluated",
+      saved: true,
       result: json.evaluation,
       evaluatedAt: new Date().toISOString(),
       error: undefined
@@ -383,7 +397,7 @@ export default function InterviewEvaluatorPage() {
             <header className="interview-topbar">
               <div>
                 <input className="interview-title-input" value={activeProject.name} onChange={(event) => updateActiveProject({ name: event.target.value })} />
-                <p>Paste questionnaire and rubric once, then add candidate transcripts and evaluate up to 5 at a time.</p>
+                <p>Paste questionnaire and rubric once, then add candidate transcripts and run the queue.</p>
               </div>
               <div className="interview-actions">
                 <button className="interview-button" onClick={handleRenameProject}>Rename</button>
@@ -398,7 +412,7 @@ export default function InterviewEvaluatorPage() {
             <div className="interview-metrics">
               <div><strong>{activeProject.candidates.length}</strong><span>Candidates</span></div>
               <div><strong>{evaluatedCount}</strong><span>Evaluated</span></div>
-              <div><strong>{leaderboard.length}</strong><span>Saved</span></div>
+              <div><strong>{leaderboard.length}</strong><span>Leaderboard</span></div>
               <div><strong>{queuedCount}</strong><span>Ready / retry</span></div>
               <div><strong>{averageScore || "-"}</strong><span>Avg score</span></div>
             </div>
@@ -467,6 +481,39 @@ export default function InterviewEvaluatorPage() {
                 ) : <div className="interview-empty">Add a candidate to paste a transcript.</div>}
               </section>
             </div>
+
+            {evaluatedCandidates.length ? (
+              <section className="interview-panel interview-comparison">
+                <div className="interview-section-head">
+                  <div>
+                    <h2>Candidate Comparison</h2>
+                    <p>All evaluated candidates ranked by score, with section marks and feedback.</p>
+                  </div>
+                </div>
+                <div className="interview-comparison-grid">
+                  {evaluatedCandidates.map((candidate, index) => (
+                    <article key={candidate.id} className="interview-comparison-card">
+                      <button className="interview-rank-button" onClick={() => setSelectedCandidateId(candidate.id)}>
+                        <strong>#{index + 1} {candidate.name}</strong>
+                        <span>{candidate.result?.totalScore} · {candidate.result?.recommendation}</span>
+                      </button>
+                      <p>{candidate.result?.summary}</p>
+                      <div className="interview-mini-marks">
+                        {candidate.result?.sectionScores.map((section) => (
+                          <span key={`${candidate.id}-${section.section}`}>{section.section}: {section.score}/{section.maxScore}</span>
+                        ))}
+                      </div>
+                      <dl className="interview-mini-feedback">
+                        <dt>Strengths</dt>
+                        <dd>{formatList(candidate.result?.strengths ?? [])}</dd>
+                        <dt>Weaknesses</dt>
+                        <dd>{formatList(candidate.result?.weaknesses ?? [])}</dd>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            ) : null}
 
             {selectedCandidate?.result ? (
               <section className="interview-panel interview-results">

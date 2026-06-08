@@ -996,6 +996,81 @@ code { background: #eef2f6; border: 1px solid #dbe2ea; border-radius: 4px; paddi
   gap: 10px;
 }
 
+.interview-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.interview-comparison-card {
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.interview-rank-button {
+  border: 0;
+  background: #ecfdf5;
+  color: #064e3b;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.interview-rank-button span {
+  white-space: nowrap;
+}
+
+.interview-comparison-card p {
+  margin: 0;
+  color: #334155;
+  line-height: 1.45;
+}
+
+.interview-mini-marks {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.interview-mini-marks span {
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  border-radius: 999px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.interview-mini-feedback {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.interview-mini-feedback dt {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.interview-mini-feedback dd {
+  margin: 0;
+  white-space: pre-wrap;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .interview-score-list div,
 .interview-question-list div {
   border: 1px solid #e2e8f0;
@@ -1070,7 +1145,8 @@ code { background: #eef2f6; border: 1px solid #dbe2ea; border-radius: 4px; paddi
   .interview-metrics,
   .interview-config-grid,
   .interview-main-grid,
-  .interview-detail-grid {
+  .interview-detail-grid,
+  .interview-comparison-grid {
     grid-template-columns: 1fr;
   }
 
