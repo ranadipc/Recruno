@@ -1,4 +1,5 @@
 import type { Brief, Candidate, Query, Settings, Tier } from "./types";
+import { matchApifyItem } from "./apify";
 import { candidateSearchText, id, quote, tierFromScore } from "./utils";
 
 function requireKey(value: string | undefined, label: string) {
@@ -130,7 +131,7 @@ export async function runApify(settings: Settings, candidates: Candidate[], brie
   if (isHarvestProfileScraper) {
     const input = {
       profileScraperMode: "Profile details no email ($4 per 1k)",
-      queries: urls.slice(0, settings.workflow.maxProfilesToApify)
+      queries: urls
     };
     const runResponse = await fetch(`https://api.apify.com/v2/acts/${actorId}/runs?token=${encodeURIComponent(token)}`, {
       method: "POST",
@@ -142,7 +143,7 @@ export async function runApify(settings: Settings, candidates: Candidate[], brie
     const runId = runPayload.data?.id;
     if (!runId) throw new Error("Apify did not return a run id.");
     let run = runPayload.data;
-    for (let attempt = 0; attempt < 12 && ["READY", "RUNNING"].includes(run.status); attempt += 1) {
+    for (let attempt = 0; attempt < 80 && ["READY", "RUNNING"].includes(run.status); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 3000));
       const poll = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${encodeURIComponent(token)}`);
       run = (await poll.json()).data;
@@ -151,12 +152,15 @@ export async function runApify(settings: Settings, candidates: Candidate[], brie
     if (!["SUCCEEDED", "RUNNING", "READY"].includes(run.status)) throw new Error(`Apify scraper run ended with status ${run.status}.`);
     const datasetResponse = await fetch(`https://api.apify.com/v2/datasets/${run.defaultDatasetId}/items?clean=true&token=${encodeURIComponent(token)}`);
     if (!datasetResponse.ok) throw new Error(`Apify scraper dataset fetch failed: ${datasetResponse.status}`);
-    const items = await datasetResponse.json();
-    return candidates.map((candidate, index) => ({
-      candidate,
-      item: items[index] ?? items.find((item: Record<string, unknown>) => JSON.stringify(item).includes(candidate.normalized_linkedin_url.split("/").pop() ?? "")),
-      status: (run.status === "SUCCEEDED" && items[index] ? "apify_success" : "apify_partial") as "apify_success" | "apify_partial"
-    }));
+    const items = await datasetResponse.json() as Array<Record<string, unknown>>;
+    return candidates.map((candidate, index) => {
+      const item = matchApifyItem(items, candidate, index);
+      return {
+        candidate,
+        item,
+        status: item ? "apify_success" as const : run.status === "SUCCEEDED" ? "apify_failed" as const : "apify_partial" as const
+      };
+    });
   }
 
   const schemaResponse = await fetch(`https://api.apify.com/v2/acts/${actorId}?token=${encodeURIComponent(token)}`);
@@ -164,9 +168,9 @@ export async function runApify(settings: Settings, candidates: Candidate[], brie
   const props = schema?.data?.inputSchema?.properties ?? schema?.inputSchema?.properties ?? {};
   const profileUrlKey = ["profileUrls", "profileURLs", "urls", "startUrls"].find((key) => props[key]);
   const input: Record<string, unknown> = {
-    maxItems: Math.min(settings.workflow.maxProfilesToApify, candidates.length),
+    maxItems: candidates.length,
     profileScraperMode: props.profileScraperMode ? "Full" : undefined,
-    takePages: props.takePages ? Math.max(1, Math.ceil(Math.min(settings.workflow.maxProfilesToApify, candidates.length) / 25)) : undefined,
+    takePages: props.takePages ? Math.max(1, Math.ceil(candidates.length / 25)) : undefined,
     startPage: props.startPage ? 1 : undefined,
     autoQuerySegmentation: props.autoQuerySegmentation ? false : undefined
   };
@@ -195,7 +199,7 @@ export async function runApify(settings: Settings, candidates: Candidate[], brie
   if (!runId) throw new Error("Apify did not return a run id.");
 
   let run = runPayload.data;
-  for (let attempt = 0; attempt < 12 && ["READY", "RUNNING"].includes(run.status); attempt += 1) {
+  for (let attempt = 0; attempt < 80 && ["READY", "RUNNING"].includes(run.status); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 3000));
     const poll = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${encodeURIComponent(token)}`);
     run = (await poll.json()).data;
@@ -205,12 +209,15 @@ export async function runApify(settings: Settings, candidates: Candidate[], brie
   const datasetId = run.defaultDatasetId;
   const datasetResponse = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?clean=true&token=${encodeURIComponent(token)}`);
   if (!datasetResponse.ok) throw new Error(`Apify dataset fetch failed: ${datasetResponse.status}`);
-  const items = await datasetResponse.json();
-  return candidates.map((candidate, index) => ({
-    candidate,
-    item: items[index] ?? items.find((item: Record<string, unknown>) => JSON.stringify(item).includes(candidate.normalized_linkedin_url.split("/").pop() ?? "")),
-    status: (run.status === "SUCCEEDED" && items[index] ? "apify_success" : "apify_partial") as "apify_success" | "apify_partial"
-  }));
+  const items = await datasetResponse.json() as Array<Record<string, unknown>>;
+  return candidates.map((candidate, index) => {
+    const item = matchApifyItem(items, candidate, index);
+    return {
+      candidate,
+      item,
+      status: item ? "apify_success" as const : run.status === "SUCCEEDED" ? "apify_failed" as const : "apify_partial" as const
+    };
+  });
 }
 
 export async function analyzeCandidate(settings: Settings, brief: Brief, candidate: Candidate, mode: "fit_intent" | "fit" | "intent", promptOverride?: string) {

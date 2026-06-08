@@ -1,30 +1,11 @@
 import { NextResponse } from "next/server";
 import { runApify } from "@/lib/external";
 import { getSettings, getState, patchState } from "@/lib/store";
-import type { Candidate, ProfileData } from "@/lib/types";
+import type { Candidate } from "@/lib/types";
 import { id, isActualIndiaProfile, normalizeLinkedInUrl } from "@/lib/utils";
+import { profileFromApifyItem } from "@/lib/apify";
 
-function profileFromItem(item: Record<string, unknown> | undefined, candidate: Candidate): ProfileData | undefined {
-  if (!item) return undefined;
-  return {
-    name: String(item.name ?? item.fullName ?? item.full_name ?? candidate.name_guess ?? ""),
-    headline: String(item.headline ?? item.title ?? item.occupation ?? candidate.title_guess ?? ""),
-    about: String(item.about ?? item.summary ?? item.description ?? ""),
-    location: String(item.location ?? item.geoLocationName ?? item.geo ?? ""),
-    current_company_location: String(item.currentCompanyLocation ?? item.companyLocation ?? ""),
-    current_title: String(item.current_title ?? item.currentTitle ?? item.jobTitle ?? item.title ?? candidate.title_guess ?? ""),
-    current_company: String(item.current_company ?? item.currentCompany ?? item.companyName ?? item.company ?? candidate.company_guess ?? ""),
-    past_companies: Array.isArray(item.past_companies)
-      ? (item.past_companies as string[])
-      : Array.isArray(item.experience)
-        ? (item.experience as Array<Record<string, unknown>>).map((exp) => String(exp.company ?? exp.companyName ?? "")).filter(Boolean)
-        : [],
-    experience: Array.isArray(item.experience) ? (item.experience as Array<Record<string, unknown>>) : [],
-    education: Array.isArray(item.education) ? (item.education as Array<Record<string, unknown> | string>) : [],
-    skills: Array.isArray(item.skills) ? (item.skills as string[]) : [],
-    posts: Array.isArray(item.posts) ? (item.posts as Array<Record<string, unknown> | string>) : []
-  };
-}
+export const maxDuration = 300;
 
 function manualCandidate(normalizedUrl: string, originalUrl: string): Candidate {
   return {
@@ -118,15 +99,18 @@ export async function POST(request: Request) {
       const output = byId.get(candidate.id);
       if (!output) return candidate;
       const item = output.item as Record<string, unknown> | undefined;
-      const profile = profileFromItem(item, candidate) ?? candidate.profile_data;
+      const profile = profileFromApifyItem(item, candidate) ?? candidate.profile_data;
       const actual = isActualIndiaProfile({ ...candidate, profile_data: profile });
-      const status: Candidate["apify_status"] = item ? "apify_success" : "apify_failed";
+      const status: Candidate["apify_status"] = item ? "apify_success" : output.status === "apify_failed" ? "apify_failed" : "pending_apify";
       return {
         ...candidate,
         apify_status: status,
         status,
         apify_raw: item,
         profile_data: profile,
+        name_guess: profile?.name || candidate.name_guess,
+        title_guess: profile?.current_title || profile?.headline || candidate.title_guess,
+        company_guess: profile?.current_company || candidate.company_guess,
         actual_location_status: actual.status,
         location_evidence: actual.evidence,
         location_confidence: actual.confidence,

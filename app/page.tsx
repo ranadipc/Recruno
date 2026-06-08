@@ -80,6 +80,10 @@ function oneClickDownloadUrl(format: "csv" | "xlsx" | "json") {
   return `/api/one-click/export/${format}`;
 }
 
+function apifyDownloadUrl(format: "csv" | "xlsx" | "json") {
+  return `/api/export/${format}?scope=apify`;
+}
+
 function displayName(candidate: Candidate) {
   return candidate.profile_data?.name || candidate.name_guess || "Unnamed profile";
 }
@@ -765,6 +769,10 @@ export default function Home() {
             <div className="tabs apify-mode-tabs" role="tablist" aria-label="Apify input method">
               <button className={apifyMode === "shortlist" ? "active" : ""} onClick={() => setApifyMode("shortlist")}>Workflow shortlist</button>
               <button className={apifyMode === "links" ? "active" : ""} onClick={() => setApifyMode("links")}>Input links</button>
+            </div>
+            <div className="actions compact-actions apify-export-actions">
+              <a className="button secondary" href={apifyDownloadUrl("xlsx")}>Download Apify XLSX</a>
+              <a className="button secondary" href={apifyDownloadUrl("csv")}>Download CSV</a>
             </div>
 
             {apifyMode === "shortlist" ? (

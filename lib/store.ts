@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { profileFromApifyItem } from "./apify";
 import { DEFAULT_SETTINGS, DEFAULT_STATE } from "./defaults";
 import type { AppState, PublicSettings, SavedWorkflow, SecretSettings, Settings } from "./types";
 
@@ -30,9 +31,23 @@ async function writeJson(file: string, value: unknown) {
 
 export async function getState(): Promise<AppState> {
   const state = await readJson<AppState>(stateFile, DEFAULT_STATE);
+  const candidates = (state.candidates ?? []).map((candidate) => {
+    const raw = candidate.apify_raw && typeof candidate.apify_raw === "object" && !Array.isArray(candidate.apify_raw)
+      ? candidate.apify_raw as Record<string, unknown>
+      : undefined;
+    const profile = profileFromApifyItem(raw, candidate) ?? candidate.profile_data;
+    return {
+      ...candidate,
+      profile_data: profile,
+      name_guess: profile?.name || candidate.name_guess,
+      title_guess: profile?.current_title || profile?.headline || candidate.title_guess,
+      company_guess: profile?.current_company || candidate.company_guess
+    };
+  });
   return {
     ...DEFAULT_STATE,
     ...state,
+    candidates,
     rejectedSerpResults: state.rejectedSerpResults ?? [],
     intentEvidenceSources: state.intentEvidenceSources ?? [],
     profileFilters: { ...DEFAULT_STATE.profileFilters, ...(state.profileFilters ?? {}) },

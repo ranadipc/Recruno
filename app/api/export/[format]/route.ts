@@ -1,19 +1,22 @@
 import { NextResponse } from "next/server";
 import ExcelJS from "exceljs";
 import { getState } from "@/lib/store";
-import { csvEscape, recruiterRows } from "@/lib/sheet";
+import { apifyRows, csvEscape, recruiterRows } from "@/lib/sheet";
 
-function rowsFromState(includeRejected: boolean) {
-  return getState().then((state) => recruiterRows(state.candidates, { includeRejected }));
+function rowsFromState(includeRejected: boolean, scope: string | null) {
+  return getState().then((state) => scope === "apify" ? apifyRows(state.candidates) : recruiterRows(state.candidates, { includeRejected }));
 }
 
 export async function GET(request: Request, context: { params: Promise<{ format: string }> }) {
   const { format } = await context.params;
-  const includeRejected = new URL(request.url).searchParams.get("includeRejected") === "1";
-  const rows = await rowsFromState(includeRejected);
+  const searchParams = new URL(request.url).searchParams;
+  const includeRejected = searchParams.get("includeRejected") === "1";
+  const scope = searchParams.get("scope");
+  const rows = await rowsFromState(includeRejected, scope);
+  const filename = scope === "apify" ? "recruno-apify-profiles" : "recruno-final-sheet";
   if (format === "json") {
     return new NextResponse(JSON.stringify(rows, null, 2), {
-      headers: { "Content-Type": "application/json", "Content-Disposition": "attachment; filename=recruno-final-sheet.json" }
+      headers: { "Content-Type": "application/json", "Content-Disposition": `attachment; filename=${filename}.json` }
     });
   }
   if (format === "xlsx") {
@@ -30,13 +33,13 @@ export async function GET(request: Request, context: { params: Promise<{ format:
     return new NextResponse(new Uint8Array(buffer), {
       headers: {
         "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "Content-Disposition": "attachment; filename=recruno-final-sheet.xlsx"
+        "Content-Disposition": `attachment; filename=${filename}.xlsx`
       }
     });
   }
   const headers = Object.keys(rows[0] ?? { "Candidate Name": "" });
   const csv = [headers.join(","), ...rows.map((row) => headers.map((header) => csvEscape(row[header as keyof typeof row])).join(","))].join("\n");
   return new NextResponse(csv, {
-    headers: { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=recruno-final-sheet.csv" }
+    headers: { "Content-Type": "text/csv", "Content-Disposition": `attachment; filename=${filename}.csv` }
   });
 }

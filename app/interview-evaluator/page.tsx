@@ -306,21 +306,24 @@ export default function InterviewEvaluatorPage() {
     }
     setRunning(true);
     stopRef.current = false;
-    setMessage(`Evaluating ${queue.length} candidate${queue.length === 1 ? "" : "s"} in parallel...`);
-    await Promise.all(queue.map(async (candidate) => {
-      if (stopRef.current) return;
+    let completed = 0;
+    setMessage(`Queued ${queue.length} candidate${queue.length === 1 ? "" : "s"}. Evaluating one at a time...`);
+    for (const candidate of queue) {
+      if (stopRef.current) break;
       const controller = new AbortController();
       controllersRef.current.add(controller);
       try {
+        setMessage(`Evaluating ${candidate.name} (${completed + 1}/${queue.length})...`);
         await evaluateCandidate(candidate, controller.signal);
+        completed += 1;
       } catch (error) {
         updateCandidate(candidate.id, { status: "queued", error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Evaluation failed." });
       } finally {
         controllersRef.current.delete(controller);
       }
-    }));
+    }
     setRunning(false);
-    setMessage(stopRef.current ? "Stopped batch evaluation." : `Finished evaluating ${queue.length} candidate${queue.length === 1 ? "" : "s"}.`);
+    setMessage(stopRef.current ? `Stopped queue after ${completed}/${queue.length} candidates.` : `Finished evaluating ${completed} candidate${completed === 1 ? "" : "s"} in sequence.`);
     stopRef.current = false;
   }
 
@@ -409,10 +412,10 @@ export default function InterviewEvaluatorPage() {
                 <div className="interview-section-head">
                   <div>
                     <h2>Candidates</h2>
-                    <p>Batch mode evaluates the first 5 candidates with transcripts.</p>
+                    <p>Queue mode evaluates the first 5 candidates one at a time.</p>
                   </div>
                   <div className="interview-actions">
-                    <button className="interview-button primary" disabled={running || !activeProject.candidates.length} onClick={() => void handleEvaluateBatch()}>Evaluate Batch (max 5)</button>
+                    <button className="interview-button primary" disabled={running || !activeProject.candidates.length} onClick={() => void handleEvaluateBatch()}>Start Queue (max 5)</button>
                     <button className="interview-button danger" disabled={!running} onClick={stopEvaluation}>Stop</button>
                   </div>
                 </div>

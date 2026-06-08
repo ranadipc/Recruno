@@ -1,4 +1,5 @@
 import type { Candidate } from "./types";
+import { profileFromApifyItem } from "./apify";
 import { flatten, isLinkedInProfileUrl } from "./utils";
 
 function aiValidationStatus(candidate: Candidate) {
@@ -54,6 +55,34 @@ export function recruiterRows(candidates: Candidate[], options: { includeRejecte
     "Manual Notes": candidate.manual_notes,
     "Recommended Outreach Angle": candidate.recommended_outreach_angle ?? candidate.final_notes ?? ""
   }));
+}
+
+export function apifyRows(candidates: Candidate[]) {
+  return candidates
+    .filter((candidate) => isLinkedInProfileUrl(candidate.normalized_linkedin_url))
+    .map((candidate) => {
+      const raw = candidate.apify_raw && typeof candidate.apify_raw === "object" && !Array.isArray(candidate.apify_raw)
+        ? candidate.apify_raw as Record<string, unknown>
+        : undefined;
+      const profile = profileFromApifyItem(raw, candidate) ?? candidate.profile_data;
+      return {
+        "Candidate Name": profile?.name || candidate.name_guess,
+        "LinkedIn URL": `https://${candidate.normalized_linkedin_url}`,
+        "Apify Status": candidate.apify_status,
+        Headline: profile?.headline || "",
+        Location: profile?.location || "",
+        "Current Role": profile?.current_title || "",
+        "Current Company": profile?.current_company || "",
+        "Past Companies": flatten(profile?.past_companies),
+        Education: flatten(profile?.education),
+        Skills: flatten(profile?.skills),
+        About: profile?.about || "",
+        Experience: flatten(profile?.experience),
+        "Visibility Factor": candidate.visibility_factor,
+        Source: candidate.raw_source_flags?.includes("manual_apify_input") ? "Apify input links" : candidate.source,
+        "Raw Apify JSON": raw ? JSON.stringify(raw) : ""
+      };
+    });
 }
 
 export function csvEscape(value: unknown) {
