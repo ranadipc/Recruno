@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const DB_NAME = "recruno-interview-evaluator";
 const STORE_NAME = "projects";
 const DEFAULT_MODEL = "gpt-5.4-mini";
-const MAX_BATCH_SIZE = 5;
 
 type SectionScore = {
   section: string;
@@ -299,7 +298,7 @@ export default function InterviewEvaluatorPage() {
 
   async function handleEvaluateBatch() {
     if (!activeProject) return;
-    const queue = activeProject.candidates.filter((candidate) => candidate.transcript.trim() && candidate.status !== "evaluating").slice(0, MAX_BATCH_SIZE);
+    const queue = activeProject.candidates.filter((candidate) => candidate.transcript.trim() && candidate.status !== "evaluating");
     if (!queue.length) {
       setMessage("Add candidate transcripts before evaluating.");
       return;
@@ -412,10 +411,10 @@ export default function InterviewEvaluatorPage() {
                 <div className="interview-section-head">
                   <div>
                     <h2>Candidates</h2>
-                    <p>Queue mode evaluates the first 5 candidates one at a time.</p>
+                    <p>Queue mode evaluates all candidates with transcripts one at a time.</p>
                   </div>
                   <div className="interview-actions">
-                    <button className="interview-button primary" disabled={running || !activeProject.candidates.length} onClick={() => void handleEvaluateBatch()}>Start Queue (max 5)</button>
+                    <button className="interview-button primary" disabled={running || !activeProject.candidates.length} onClick={() => void handleEvaluateBatch()}>Start Queue</button>
                     <button className="interview-button danger" disabled={!running} onClick={stopEvaluation}>Stop</button>
                   </div>
                 </div>
