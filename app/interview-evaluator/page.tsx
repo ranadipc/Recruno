@@ -228,6 +228,19 @@ export default function InterviewEvaluatorPage() {
     setSelectedCandidateId(candidate.id);
   }
 
+  function handleRenameProject() {
+    if (!activeProject) return;
+    const nextName = window.prompt("Rename project", activeProject.name);
+    if (nextName?.trim()) updateActiveProject({ name: nextName.trim() });
+  }
+
+  function clearCandidates() {
+    if (!activeProject) return;
+    updateActiveProject({ candidates: [] });
+    setSelectedCandidateId("");
+    setMessage("Cleared candidates. Questionnaire and rubric were kept.");
+  }
+
   function removeCandidate(candidateId: string) {
     if (!activeProject) return;
     const nextCandidates = activeProject.candidates.filter((candidate) => candidate.id !== candidateId);
@@ -373,7 +386,9 @@ export default function InterviewEvaluatorPage() {
                 <p>Paste questionnaire and rubric once, then add candidate transcripts and evaluate up to 5 at a time.</p>
               </div>
               <div className="interview-actions">
+                <button className="interview-button" onClick={handleRenameProject}>Rename</button>
                 <button className="interview-button" onClick={handleAddCandidate}>Add Candidate</button>
+                <button className="interview-button danger" disabled={!activeProject.candidates.length} onClick={clearCandidates}>Clear Candidates</button>
                 <button className="interview-button danger" disabled={projects.length <= 1} onClick={handleDeleteProject}>Delete Project</button>
               </div>
             </header>

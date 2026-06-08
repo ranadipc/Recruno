@@ -543,6 +543,12 @@ export default function ResumeEvaluatorPage() {
     });
   }
 
+  function clearProfiles() {
+    if (!activeProject) return;
+    updateActiveProject({ files: [] });
+    setMessage("Cleared uploaded profiles. Rubric and project settings were kept.");
+  }
+
   function removeFile(fileId: string) {
     if (!activeProject) return;
     updateActiveProject({ files: activeProject.files.filter((file) => file.id !== fileId) });
@@ -629,6 +635,7 @@ export default function ResumeEvaluatorPage() {
               <div className="resume-actions">
                 <button className="resume-button" onClick={handleRenameProject}>Rename</button>
                 <button className="resume-button" onClick={handleDuplicateProject}>Duplicate</button>
+                <button className="resume-button danger" disabled={!activeProject.files.length} onClick={clearProfiles}>Clear Profiles</button>
                 <button className="resume-button danger" disabled={projects.length <= 1} onClick={handleDeleteProject}>Delete</button>
               </div>
             </header>
