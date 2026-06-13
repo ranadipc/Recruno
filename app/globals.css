@@ -418,6 +418,31 @@ code { background: #eef2f6; border: 1px solid #dbe2ea; border-radius: 4px; paddi
   font-weight: 720;
 }
 
+.resume-mode-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 16px;
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.resume-mode-tabs button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #475569;
+  padding: 8px 13px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.resume-mode-tabs button.active {
+  background: #0369a1;
+  color: #fff;
+}
+
 .resume-metrics {
   display: grid;
   grid-template-columns: repeat(5, minmax(120px, 1fr));
