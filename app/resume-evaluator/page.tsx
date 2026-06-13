@@ -18,6 +18,7 @@ type Grade = {
   phoneNumber: string;
   email: string;
   linkedInUrl: string;
+  extraFields?: Record<string, string>;
   totalScore: number;
   recommendation: "Strong Select" | "Select" | "Maybe" | "Reject" | "Strong Reject";
   subMarks: Array<{ section: string; score: number; maxScore: number; reason: string }>;
@@ -69,6 +70,7 @@ type ResumeProject = {
   files: ResumeFile[];
   sheetRows: SheetCandidate[];
   sheetFileName?: string;
+  additionalColumns: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -262,6 +264,12 @@ function sourceValue(row: Record<string, string>, patterns: RegExp[]) {
 }
 
 function sheetRowsForExport(project: ResumeProject) {
+  const requestedColumns = project.additionalColumns
+    .split(",")
+    .map((column) => column.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+
   return project.sheetRows
     .filter((row) => row.result && row.result.totalScore >= project.exportMinScore)
     .map((row) => {
@@ -270,21 +278,30 @@ function sheetRowsForExport(project: ResumeProject) {
       const sourcePhone = sourceValue(row.original, [/phone/i, /mobile/i, /contact.*number/i]);
       const sourceEmail = sourceValue(row.original, [/email/i]);
       const sourceLinkedIn = sourceValue(row.original, [/linkedin/i, /profile.*url/i, /profile.*link/i]);
-      return {
+      const requestedValues = Object.fromEntries(requestedColumns.map((column) => {
+        const extracted = Object.entries(result.extraFields ?? {}).find(([key]) => key.toLowerCase() === column.toLowerCase())?.[1];
+        const source = Object.entries(row.original).find(([key]) => key.toLowerCase() === column.toLowerCase())?.[1];
+        return [column, extracted || source || ""];
+      }));
+      const scoredValues = {
         "Source Row": row.sourceRowNumber,
         Name: result.name || sourceName,
         "Phone Number": result.phoneNumber || sourcePhone,
         Email: result.email || sourceEmail,
         "Total Score": result.totalScore,
         "LinkedIn URL": result.linkedInUrl || sourceLinkedIn,
+        ...requestedValues,
         "Decision Band": decisionBand(result.totalScore, project),
         Recommendation: result.recommendation,
         "Sub Marks": formatSubMarks(result.subMarks),
         Remarks: formatRemarks(result),
         Summary: result.summary,
-        "Graded Timestamp": row.gradedAt ?? "",
-        ...row.original
+        "Graded Timestamp": row.gradedAt ?? ""
       };
+      const originalValues = Object.fromEntries(
+        Object.entries(row.original).filter(([key]) => !Object.keys(scoredValues).some((scoredKey) => scoredKey.toLowerCase() === key.toLowerCase()))
+      );
+      return { ...scoredValues, ...originalValues };
     });
 }
 
@@ -342,6 +359,7 @@ function newProject(name = "Resume Screening Project"): ResumeProject {
     exportMinScore: 70,
     files: [],
     sheetRows: [],
+    additionalColumns: "",
     createdAt: now,
     updatedAt: now
   };
@@ -388,7 +406,8 @@ export default function ResumeEvaluatorPage() {
                 shortlistScore: project.shortlistScore || DEFAULT_SHORTLIST_SCORE,
                 rejectionScore: project.rejectionScore || DEFAULT_REJECTION_SCORE,
                 exportMinScore: project.exportMinScore ?? 70,
-                sheetRows: project.sheetRows ?? []
+                sheetRows: project.sheetRows ?? [],
+                additionalColumns: project.additionalColumns ?? ""
               }))
               .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
           : [newProject()];
@@ -577,13 +596,13 @@ export default function ResumeEvaluatorPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  async function gradeSheetCandidate(projectId: string, row: SheetCandidate, rubric: string, model: string, signal?: AbortSignal) {
+  async function gradeSheetCandidate(projectId: string, row: SheetCandidate, rubric: string, model: string, additionalColumns: string, signal?: AbortSignal) {
     updateSheetRow(projectId, row.id, { status: "grading", error: undefined });
     const response = await fetch("/api/resume-evaluator/grade-row", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal,
-      body: JSON.stringify({ row: row.original, rubric, model: model || DEFAULT_MODEL })
+      body: JSON.stringify({ row: row.original, rubric, model: model || DEFAULT_MODEL, additionalColumns })
     });
     const json = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -684,7 +703,7 @@ export default function ResumeEvaluatorPage() {
     controllersRef.current.add(controller);
     setMessage(`Grading source row ${row.sourceRowNumber}...`);
     try {
-      await gradeSheetCandidate(activeProject.id, row, activeProject.rubric, activeProject.model, controller.signal);
+      await gradeSheetCandidate(activeProject.id, row, activeProject.rubric, activeProject.model, activeProject.additionalColumns, controller.signal);
       setMessage(`Finished source row ${row.sourceRowNumber}.`);
     } catch (error) {
       updateSheetRow(activeProject.id, row.id, { status: "queued", error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Row grading failed." });
@@ -708,7 +727,7 @@ export default function ResumeEvaluatorPage() {
       const controller = new AbortController();
       controllersRef.current.add(controller);
       try {
-        await gradeSheetCandidate(activeProject.id, row, activeProject.rubric, activeProject.model, controller.signal);
+        await gradeSheetCandidate(activeProject.id, row, activeProject.rubric, activeProject.model, activeProject.additionalColumns, controller.signal);
         completed += 1;
         setMessage(`Graded ${completed}/${queue.length} sheet rows.`);
       } catch (error) {
@@ -927,11 +946,24 @@ export default function ResumeEvaluatorPage() {
                   </div>
                 </div>
                 {activeProject.mode === "sheet" ? (
-                  <label className="resume-dropzone">
-                    <input ref={fileInputRef} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" onChange={(event) => void handleSheetFile(event.target.files?.[0])} />
-                    <strong>Add XLSX or CSV</strong>
-                    <span>{activeProject.sheetFileName ? `${activeProject.sheetFileName} · ${activeProject.sheetRows.length} rows loaded` : "Your original columns will be preserved in the scored output."}</span>
-                  </label>
+                  <>
+                    <label className="resume-dropzone">
+                      <input ref={fileInputRef} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" onChange={(event) => void handleSheetFile(event.target.files?.[0])} />
+                      <strong>Add XLSX or CSV</strong>
+                      <span>{activeProject.sheetFileName ? `${activeProject.sheetFileName} · ${activeProject.sheetRows.length} rows loaded` : "Your original columns will be preserved in the scored output."}</span>
+                    </label>
+                    <div className="resume-run-settings resume-export-filter">
+                      <label>
+                        <span>Additional output columns</span>
+                        <input
+                          value={activeProject.additionalColumns}
+                          placeholder="Skills, Current company, Current company duration"
+                          onChange={(event) => updateActiveProject({ additionalColumns: event.target.value })}
+                        />
+                      </label>
+                      <p>Comma-separated, up to 20. Each field is extracted from the available row data and left blank when unavailable.</p>
+                    </div>
+                  </>
                 ) : (
                   <label className="resume-dropzone">
                     <input ref={fileInputRef} type="file" multiple accept=".pdf,.doc,.docx,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip" onChange={(event) => void handleFiles(event.target.files)} />
@@ -1013,6 +1045,7 @@ export default function ResumeEvaluatorPage() {
                         <th>Band</th>
                         <th>Recommendation</th>
                         <th>Sub marks</th>
+                        <th>Additional fields</th>
                         <th>Remarks</th>
                         <th>Actions</th>
                       </tr>
@@ -1035,6 +1068,9 @@ export default function ResumeEvaluatorPage() {
                             <td>{row.result ? decisionBand(row.result.totalScore, activeProject) : "-"}</td>
                             <td>{row.result?.recommendation || "-"}</td>
                             <td className="resume-long">{formatSubMarks(row.result?.subMarks) || "-"}</td>
+                            <td className="resume-long">
+                              {Object.entries(row.result?.extraFields ?? {}).map(([key, value]) => `${key}: ${value || "-"}`).join("; ") || "-"}
+                            </td>
                             <td className="resume-long">{formatRemarks(row.result) || "-"}</td>
                             <td>
                               <div className="resume-row-actions">
@@ -1044,7 +1080,7 @@ export default function ResumeEvaluatorPage() {
                             </td>
                           </tr>
                         );
-                      }) : <tr><td colSpan={12} className="resume-empty">No sheet loaded. Add an XLSX or CSV file to begin.</td></tr>}
+                      }) : <tr><td colSpan={13} className="resume-empty">No sheet loaded. Add an XLSX or CSV file to begin.</td></tr>}
                     </tbody>
                   </table>
                 ) : (

@@ -9,6 +9,7 @@ type FixedGrade = {
   phoneNumber: string;
   email: string;
   linkedInUrl: string;
+  extraFields: Record<string, string>;
   totalScore: number;
   recommendation: "Strong Select" | "Select" | "Maybe" | "Reject" | "Strong Reject";
   subMarks: Array<{ section: string; score: number; maxScore: number; reason: string }>;
@@ -52,9 +53,10 @@ function normalizeIndianPhone(value: unknown) {
   return asString(value).replace(/^\s*(?:\+{1,2}91|0091)[\s-]*/i, "").replace(/[^\d]/g, "");
 }
 
-function normalizeGrade(value: unknown): FixedGrade {
+function normalizeGrade(value: unknown, requestedColumns: string[]): FixedGrade {
   const input = value && typeof value === "object" && !Array.isArray(value) ? value as RawGrade : {};
   const remarks = input.remarks && typeof input.remarks === "object" && !Array.isArray(input.remarks) ? input.remarks as RawGrade : {};
+  const rawExtraFields = input.extraFields && typeof input.extraFields === "object" && !Array.isArray(input.extraFields) ? input.extraFields as RawGrade : {};
   const subMarks = Array.isArray(input.subMarks)
     ? input.subMarks.map((item) => {
         const mark = item && typeof item === "object" ? item as RawGrade : {};
@@ -73,6 +75,10 @@ function normalizeGrade(value: unknown): FixedGrade {
     phoneNumber: normalizeIndianPhone(input.phoneNumber || input.phone || input["Phone Number"]),
     email: asString(input.email || input.emailAddress || input["Email"]),
     linkedInUrl: asString(input.linkedInUrl || input.linkedinUrl || input.linkedin || input["LinkedIn URL"]),
+    extraFields: Object.fromEntries(requestedColumns.map((column) => {
+      const match = Object.entries(rawExtraFields).find(([key]) => key.toLowerCase() === column.toLowerCase());
+      return [column, asString(match?.[1])];
+    })),
     totalScore: clampScore(input.totalScore || input.score || input["Total Score"]),
     recommendation: allowed.has(recommendation) ? recommendation as FixedGrade["recommendation"] : "Maybe",
     subMarks,
@@ -93,6 +99,11 @@ export async function POST(request: Request) {
     const row = body.row && typeof body.row === "object" && !Array.isArray(body.row) ? body.row as Record<string, unknown> : {};
     const rubric = asString(body.rubric);
     const model = asString(body.model) || DEFAULT_MODEL;
+    const requestedColumns = asString(body.additionalColumns)
+      .split(",")
+      .map((column) => column.trim())
+      .filter(Boolean)
+      .slice(0, 20);
     if (!Object.keys(row).length) return NextResponse.json({ error: "Spreadsheet row data is required." }, { status: 400 });
     if (!rubric) return NextResponse.json({ error: "Rubric is required." }, { status: 400 });
 
@@ -116,6 +127,9 @@ Return only valid JSON with exactly this shape:
   "phoneNumber": "string",
   "email": "string",
   "linkedInUrl": "string",
+  "extraFields": {
+    ${requestedColumns.length ? requestedColumns.map((column) => `"${column.replace(/"/g, "\\\"")}": "string"`).join(",\n    ") : ""}
+  },
   "totalScore": 0,
   "recommendation": "Strong Select|Select|Maybe|Reject|Strong Reject",
   "subMarks": [{"section":"string","score":0,"maxScore":100,"reason":"string"}],
@@ -133,6 +147,8 @@ Rules:
 - Use only the provided row data. Do not invent missing experience or qualifications.
 - Preserve and return LinkedIn/profile URL whenever one exists in any source column. This is especially important.
 - Preserve name, email, and phone when available.
+- Fill every requested extraFields key from the available row data. Use an empty string when the row does not contain enough evidence.
+- Requested additional output columns: ${requestedColumns.length ? requestedColumns.join(", ") : "None"}.
 - For explicit Indian country-code prefixes such as +91, ++91, or 0091, remove only that prefix.
 - totalScore must be 0-100.
 - subMarks must be quantifiable and follow the rubric sections.
@@ -158,7 +174,7 @@ Rules:
       return NextResponse.json({ error: `OpenAI request failed: ${response.status} ${await response.text()}` }, { status: 400 });
     }
     const payload = await response.json();
-    return NextResponse.json({ grade: normalizeGrade(extractJson<unknown>(outputText(payload))), model });
+    return NextResponse.json({ grade: normalizeGrade(extractJson<unknown>(outputText(payload)), requestedColumns), model });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Spreadsheet row grading failed." }, { status: 400 });
   }
