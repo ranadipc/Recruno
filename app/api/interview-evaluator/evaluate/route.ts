@@ -58,10 +58,11 @@ function normalizeEvaluation(value: unknown): InterviewEvaluation {
   const sectionScores = Array.isArray(input.sectionScores)
     ? input.sectionScores.map((item) => {
         const section = item && typeof item === "object" ? item as Record<string, unknown> : {};
+        const maxScore = Math.max(1, clampScore(section.maxScore, 100));
         return {
           section: asString(section.section || "Unspecified"),
-          score: clampScore(section.score),
-          maxScore: Math.max(1, clampScore(section.maxScore, 100)),
+          score: Math.min(clampScore(section.score), maxScore),
+          maxScore,
           evidence: asStringArray(section.evidence),
           feedback: asString(section.feedback)
         };
@@ -153,6 +154,7 @@ Return only valid JSON with exactly this shape:
 Rules:
 - totalScore must be 0-100.
 - sectionScores must be quantifiable. Use rubric sections when available. If the rubric asks for 3 sections, return those 3 sections.
+- Every section score must be between 0 and that section's maxScore. Never award more than the allowed maximum (for example, never return 14/10).
 - questionCoverage must map important questionnaire questions to whether the candidate answered them.
 - Feedback must cite evidence from the cleaned transcript.
 - Be strict when the transcript does not contain evidence.

@@ -68,10 +68,11 @@ function normalizeGrade(value: unknown): FixedResumeGrade {
   const subMarks = Array.isArray(input.subMarks)
     ? input.subMarks.map((item) => {
         const mark = item && typeof item === "object" ? item as ResumeGrade : {};
+        const maxScore = Math.max(1, clampScore(mark.maxScore, 100));
         return {
           section: asString(mark.section || mark.category || "Unspecified"),
-          score: clampScore(mark.score),
-          maxScore: Math.max(1, clampScore(mark.maxScore, 100)),
+          score: Math.min(clampScore(mark.score), maxScore),
+          maxScore,
           reason: asString(mark.reason || mark.evidence)
         };
       })
@@ -165,6 +166,7 @@ Rules:
 - totalScore must be an integer from 0 to 100.
 - recommendation must be one of the allowed values.
 - subMarks must be quantifiable rubric section marks, not qualitative labels. If the user's rubric has sections, use those section names. If it does not, create 3-5 practical sections from the rubric.
+- Every subMarks score must be between 0 and that section's maxScore. Never award more than the allowed maximum (for example, never return 14/10).
 - remarks.selectedOrRejectedReason must clearly explain why the person was selected/rejected/maybe.
 - remarks must be concise but useful, like neat bullets when rendered in a spreadsheet cell.
 - Use only evidence present in the resume.

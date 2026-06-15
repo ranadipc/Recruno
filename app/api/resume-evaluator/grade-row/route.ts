@@ -60,10 +60,11 @@ function normalizeGrade(value: unknown, requestedColumns: string[]): FixedGrade 
   const subMarks = Array.isArray(input.subMarks)
     ? input.subMarks.map((item) => {
         const mark = item && typeof item === "object" ? item as RawGrade : {};
+        const maxScore = Math.max(1, clampScore(mark.maxScore, 100));
         return {
           section: asString(mark.section || mark.category || "Unspecified"),
-          score: clampScore(mark.score),
-          maxScore: Math.max(1, clampScore(mark.maxScore, 100)),
+          score: Math.min(clampScore(mark.score), maxScore),
+          maxScore,
           reason: asString(mark.reason || mark.evidence)
         };
       })
@@ -152,6 +153,7 @@ Rules:
 - For explicit Indian country-code prefixes such as +91, ++91, or 0091, remove only that prefix.
 - totalScore must be 0-100.
 - subMarks must be quantifiable and follow the rubric sections.
+- Every subMarks score must be between 0 and that section's maxScore. Never award more than the allowed maximum (for example, never return 14/10).
 - Clearly explain selection/rejection in remarks.
 - Use empty strings for missing contact/profile fields.
 - Do not include markdown outside JSON.
