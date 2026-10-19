@@ -225,3 +225,14 @@ Tier thresholds are:
 - Tier 2: 60 to 80
 - Tier 3: 30 to 60
 - Tier 4: below 30
+
+
+## Resume Evaluator rubric rules
+
+Each project prepares a scoring rule set once per distinct rubric text. Subsequent evaluations reuse the saved rules. Editing a rubric creates a new version; previous successful assessments remain in result history and exports. Legacy results without a version can be re-evaluated.
+
+The AI selects evidence-backed component marks. Application code checks allowed marks, component coverage, exact text excerpts, missing-evidence policies and review checks, then calculates the weighted total. Unknown components remain unresolved rather than silently becoming zero. Decisions follow explicit rubric bands/review rules, with manual review when no automatic decision is specified. There is no universal score scale or default score-based export cutoff.
+
+Review the saved rule set in the project. The supported calculation is a sum of leaf component scores with positive multipliers. Ambiguous rules, nonnumeric grading, conditional caps/deductions and other unsupported formulas are flagged for clarification rather than approximated. Rules and candidate evidence are stored in this browser; clearing browser storage removes them. The first use of a new rubric makes an additional provider request.
+
+Run `npm test` for the scoring/API regressions. Browser regressions are in `tests/resume-browser.cjs` and use fictional PDF/DOCX fixtures from `tests/fixtures/resumes`. See `RESUME-EVALUATOR-TEST-REPORT.md` for setup, coverage and limitations. The test suite uses fake provider responses; it does not spend AI credits.

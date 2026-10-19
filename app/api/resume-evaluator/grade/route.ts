@@ -1,102 +1,22 @@
 import { NextResponse } from "next/server";
-import { getSettings } from "@/lib/store";
+import {
+  createStructuredResumeResponse,
+  DEFAULT_OPENAI_MODEL,
+  parseResumeLlmEffort,
+  parseResumeLlmProvider
+} from "@/lib/resume-llm";
 
-const DEFAULT_MODEL = "gpt-5.4-mini";
+import { gradingPrompt, validateGrade } from "@/lib/rubric";
+import { responseJson, rulesForRequest } from "@/lib/rubric-server";
+
 const MAX_PDF_BYTES = 3_000_000;
+const MAX_VISUAL_FALLBACK_BYTES = 15_000_000;
 const SUPPORTED_EXTENSIONS = new Set(["pdf", "doc", "docx"]);
 const MIME_BY_EXTENSION: Record<string, string> = {
   pdf: "application/pdf",
   doc: "application/msword",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 };
-
-type ResumeGrade = Record<string, unknown>;
-type FixedResumeGrade = {
-  name: string;
-  phoneNumber: string;
-  email: string;
-  linkedInUrl: string;
-  totalScore: number;
-  recommendation: "Strong Select" | "Select" | "Maybe" | "Reject" | "Strong Reject";
-  subMarks: Array<{ section: string; score: number; maxScore: number; reason: string }>;
-  remarks: {
-    strengths: string[];
-    weaknesses: string[];
-    selectedOrRejectedReason: string;
-    missingEvidence: string[];
-    risks: string[];
-  };
-  summary: string;
-};
-
-function extractJson<T>(text: string): T {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-  const candidate = fenced ?? text.match(/\{[\s\S]*\}|\[[\s\S]*\]/)?.[0] ?? text;
-  return JSON.parse(candidate) as T;
-}
-
-function outputText(payload: { output_text?: string; output?: Array<{ content?: Array<{ text?: string }> }> }) {
-  return payload.output_text ?? payload.output?.flatMap((item) => item.content ?? []).map((part) => part.text ?? "").join("\n") ?? "";
-}
-
-function asString(value: unknown) {
-  return String(value ?? "").trim();
-}
-
-function asStringArray(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map((item) => asString(item)).filter(Boolean);
-  const text = asString(value);
-  return text ? [text] : [];
-}
-
-function clampScore(value: unknown, fallback = 0) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return fallback;
-  return Math.max(0, Math.min(100, Math.round(number)));
-}
-
-function normalizeIndianPhone(value: unknown) {
-  let phone = asString(value);
-  phone = phone.replace(/^\s*(?:\+{1,2}91|0091)[\s-]*/i, "");
-  phone = phone.replace(/[^\d]/g, "");
-  return phone;
-}
-
-function normalizeGrade(value: unknown): FixedResumeGrade {
-  const input = value && typeof value === "object" && !Array.isArray(value) ? value as ResumeGrade : {};
-  const remarks = input.remarks && typeof input.remarks === "object" && !Array.isArray(input.remarks) ? input.remarks as ResumeGrade : {};
-  const subMarks = Array.isArray(input.subMarks)
-    ? input.subMarks.map((item) => {
-        const mark = item && typeof item === "object" ? item as ResumeGrade : {};
-        const maxScore = Math.max(1, clampScore(mark.maxScore, 100));
-        return {
-          section: asString(mark.section || mark.category || "Unspecified"),
-          score: Math.min(clampScore(mark.score), maxScore),
-          maxScore,
-          reason: asString(mark.reason || mark.evidence)
-        };
-      })
-    : [];
-  const allowed = new Set(["Strong Select", "Select", "Maybe", "Reject", "Strong Reject"]);
-  const recommendation = asString(input.recommendation);
-  return {
-    name: asString(input.name || input.candidateName || input["Candidate Name"]) || "Unknown candidate",
-    phoneNumber: normalizeIndianPhone(input.phoneNumber || input.phone || input["Phone Number"]),
-    email: asString(input.email || input.emailAddress || input["Email"]),
-    linkedInUrl: asString(input.linkedInUrl || input.linkedinUrl || input.linkedin || input["LinkedIn URL"]),
-    totalScore: clampScore(input.totalScore || input.score || input["Total Score"]),
-    recommendation: allowed.has(recommendation) ? recommendation as FixedResumeGrade["recommendation"] : "Maybe",
-    subMarks,
-    remarks: {
-      strengths: asStringArray(remarks.strengths || input.strengths),
-      weaknesses: asStringArray(remarks.weaknesses || remarks.concerns || input.weaknesses || input.concerns),
-      selectedOrRejectedReason: asString(remarks.selectedOrRejectedReason || remarks.reason || input.selectedOrRejectedReason || input.reason),
-      missingEvidence: asStringArray(remarks.missingEvidence || input.missingEvidence),
-      risks: asStringArray(remarks.risks || input.risks)
-    },
-    summary: asString(input.summary)
-  };
-}
 
 function extensionFor(fileName: string) {
   return fileName.toLowerCase().split(".").pop() ?? "";
@@ -107,20 +27,47 @@ export async function POST(request: Request) {
     const form = await request.formData();
     const file = form.get("file");
     const rubric = String(form.get("rubric") ?? "").trim();
-    const model = String(form.get("model") ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+    const provider = parseResumeLlmProvider(form.get("provider"));
+    const model = String(form.get("model") ?? DEFAULT_OPENAI_MODEL).trim() || DEFAULT_OPENAI_MODEL;
+    const effort = parseResumeLlmEffort(form.get("effort"));
+    const apiKey = String(form.get("apiKey") ?? "").trim();
     const fileName = String(form.get("fileName") ?? "resume.pdf");
     const extractedText = String(form.get("extractedText") ?? "").trim();
+    const extractionMethod = String(form.get("extractionMethod") ?? "none").trim();
+    const visualFallbackError = String(form.get("visualFallbackError") ?? "").trim();
+    const pageImages = form.getAll("pageImages")
+      .filter((value): value is string => typeof value === "string" && /^data:image\/(?:jpeg|png|webp);base64,/i.test(value))
+      .slice(0, 8);
+    let extractionStatus: "good" | "uncertain" | "poor" | "unknown" = "unknown";
+    let extractionIssues: string[] = [];
+    try {
+      const quality = JSON.parse(String(form.get("extractionQuality") ?? "{}")) as { status?: unknown; issues?: unknown };
+      if (quality.status === "good" || quality.status === "uncertain" || quality.status === "poor") extractionStatus = quality.status;
+      if (Array.isArray(quality.issues)) extractionIssues = quality.issues.map((issue) => String(issue)).slice(0, 10);
+    } catch {
+      extractionStatus = "unknown";
+    }
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Upload one resume file to grade." }, { status: 400 });
     }
+    if (!file.size) throw new Error("Resume file is empty. Re-upload a readable file.");
+    if (extractedText.length > 200000) throw new Error("Resume text exceeds the supported size. Split the document; no text was silently truncated.");
     const extension = extensionFor(fileName || file.name);
     if (!SUPPORTED_EXTENSIONS.has(extension)) {
       return NextResponse.json({ error: "Only PDF, DOC, and DOCX resumes can be graded." }, { status: 400 });
     }
     const textOnlyDocument = extension === "doc" || extension === "docx";
-    if (file.size > MAX_PDF_BYTES && extractedText.length < 500 && !(textOnlyDocument && extractedText.length >= 100)) {
-      return NextResponse.json({ error: "This file is too large for the v1 upload path. Keep files under 3 MB." }, { status: 413 });
+    const extractedTextIsUsable = textOnlyDocument
+      ? extractedText.length >= 100
+      : extractionStatus === "good"
+        ? extractedText.length >= 100
+        : extractionStatus === "unknown" && extractedText.length >= 500;
+    if (file.size > MAX_VISUAL_FALLBACK_BYTES && !extractedTextIsUsable) {
+      return NextResponse.json({ error: "This resume is too large for visual fallback. Keep it under 15 MB or upload a text-readable version." }, { status: 413 });
+    }
+    if (file.size > MAX_PDF_BYTES && !extractedTextIsUsable && !pageImages.length) {
+      return NextResponse.json({ error: `This file needs visual fallback, but page images could not be prepared${visualFallbackError ? `: ${visualFallbackError}` : "."}` }, { status: 413 });
     }
     if (textOnlyDocument && extractedText.length < 100) {
       return NextResponse.json({ error: "Could not extract enough text from this DOC/DOCX file. Please convert it to PDF or upload a text-readable DOCX." }, { status: 400 });
@@ -129,91 +76,64 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Add a rubric prompt before grading." }, { status: 400 });
     }
 
-    const settings = await getSettings();
-    if (!settings.OPENAI_API_KEY) {
-      return NextResponse.json({ error: "OPENAI_API_KEY is missing. Add it in Settings or Vercel environment variables." }, { status: 400 });
+    if (!apiKey) {
+      return NextResponse.json({ error: `Enter your ${provider === "deepseek" ? "DeepSeek" : "OpenAI"} API key before grading.` }, { status: 400 });
     }
 
-    const useExtractedText = textOnlyDocument || extractedText.length >= 500;
-    const prompt = `
-You are grading a resume for a recruiting workflow.
-
-Rubric / grading scheme:
-${rubric}
-
-Return only valid JSON with exactly this shape:
-{
-  "name": "string",
-  "phoneNumber": "string",
-  "email": "string",
-  "linkedInUrl": "string",
-  "totalScore": 0,
-  "recommendation": "Strong Select|Select|Maybe|Reject|Strong Reject",
-  "subMarks": [{"section":"string","score":0,"maxScore":100,"reason":"string"}],
-  "remarks": {
-    "strengths": ["string"],
-    "weaknesses": ["string"],
-    "selectedOrRejectedReason": "string",
-    "missingEvidence": ["string"],
-    "risks": ["string"]
-  },
-  "summary": "string"
-}
-
-Rules:
-- Always extract name, phoneNumber, email, and linkedInUrl when visible in the resume. Use empty string if not found.
-- For Indian phone numbers, remove the country code. If the resume says "+91 9999999999", phoneNumber must be "9999999999". Do not include leading +, =, spaces, or country code in phoneNumber.
-- totalScore must be an integer from 0 to 100.
-- recommendation must be one of the allowed values.
-- subMarks must be quantifiable rubric section marks, not qualitative labels. If the user's rubric has sections, use those section names. If it does not, create 3-5 practical sections from the rubric.
-- Every subMarks score must be between 0 and that section's maxScore. Never award more than the allowed maximum (for example, never return 14/10).
-- remarks.selectedOrRejectedReason must clearly explain why the person was selected/rejected/maybe.
-- remarks must be concise but useful, like neat bullets when rendered in a spreadsheet cell.
-- Use only evidence present in the resume.
-- If a criterion cannot be verified, list it in missingEvidence.
-- Keep notes concise and useful for a recruiter reviewing many resumes.
-- Do not include markdown or commentary outside JSON.
-- Do not wrap the row in an array.
+    if (Number(form.get("pageCount")) > 8 && !extractedTextIsUsable) throw new Error("Visual fallback supports up to 8 pages. Upload a text-readable PDF or split this resume; later pages must not be silently omitted.");
+    const useExtractedText = extractedTextIsUsable;
+    const usePageImages = pageImages.length > 0 && !useExtractedText;
+    const includeUncertainText = usePageImages && extractionStatus === "uncertain" && extractedText.length >= 100;
+    const rules = rulesForRequest(JSON.parse(String(form.get("rules") ?? "null")), rubric);
+    const prompt = `${gradingPrompt(rules)}
 
 Resume filename: ${fileName}
-${useExtractedText ? `\nResume text extracted locally to reduce cost:\n${extractedText.slice(0, 24000)}` : ""}
+Text extraction method: ${extractionMethod}
+Text extraction status: ${extractionStatus}
+${extractionIssues.length ? `Extraction warnings: ${extractionIssues.join("; ")}` : ""}
+${useExtractedText ? `\nResume text extracted locally:\n${extractedText}` : ""}
+${includeUncertainText ? `\nThe following locally extracted text may have layout or character errors. Cross-check it against the attached page images:\n${extractedText}` : ""}
 `;
 
     const content: Array<Record<string, string>> = useExtractedText ? [{ type: "input_text", text: prompt }] : [];
-    if (!useExtractedText) {
+    if (usePageImages) {
+      content.push(
+        ...pageImages.map((imageUrl) => ({ type: "input_image", image_url: imageUrl, detail: "high" })),
+        { type: "input_text", text: prompt }
+      );
+    } else if (!useExtractedText) {
+      if (provider === "deepseek") {
+        return NextResponse.json({ error: "Text extraction failed and no readable page images were produced for DeepSeek." }, { status: 400 });
+      }
       const buffer = Buffer.from(await file.arrayBuffer());
       const mime = MIME_BY_EXTENSION[extension] || file.type || "application/octet-stream";
       const fileData = `data:${mime};base64,${buffer.toString("base64")}`;
       content.push({ type: "input_file", filename: fileName, file_data: fileData }, { type: "input_text", text: prompt });
     }
 
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${settings.OPENAI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model,
-        input: [
-          {
-            role: "user",
-            content
-          }
-        ],
-        text: {
-          format: { type: "json_object" }
+    const payload = await createStructuredResumeResponse({
+      signal: request.signal,
+      provider,
+      apiKey,
+      model,
+      effort,
+      input: [
+        {
+          role: "user",
+          content
         }
-      })
+      ]
     });
-
-    if (!response.ok) {
-      return NextResponse.json({ error: `OpenAI request failed: ${response.status} ${await response.text()}` }, { status: 400 });
-    }
-
-    const payload = await response.json();
-    const parsed = extractJson<unknown>(outputText(payload));
-    return NextResponse.json({ grade: normalizeGrade(parsed), model });
+    const parsed = responseJson(payload);
+    return NextResponse.json({
+      grade: validateGrade(parsed, rules, [], useExtractedText ? extractedText : undefined),
+      provider,
+      model: provider === "deepseek" ? "deepseek-flash" : model,
+      effort,
+      inputMode: useExtractedText ? "text" : usePageImages ? "page-images" : "original-file",
+      extractionMethod,
+      extractionStatus
+    });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Resume grading failed." }, { status: 400 });
   }
