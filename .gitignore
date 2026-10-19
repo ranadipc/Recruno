@@ -9,3 +9,6 @@ data/
 out/
 dist/
 *.log
+
+# Isolated automated verification outputs
+.next-*/

@@ -1,36 +1,39 @@
 "use client";
 
 import JSZip from "jszip";
+import { scoreLabel, reusableRules, resumeQueue, validateRules, type RubricRules, type RubricGrade } from "@/lib/rubric";
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  extractResumeDocument,
+  renderPdfPagesAsImages,
+  type ExtractionQuality,
+  type ResumeExtractionMethod
+} from "@/lib/resume-extraction";
 
 const DB_NAME = "recruno-resume-evaluator";
 const STORE_NAME = "projects";
 const MAX_PDF_BYTES = 3_000_000;
+const MAX_VISUAL_FALLBACK_BYTES = 15_000_000;
 const DEFAULT_MODEL = "gpt-5.4-mini";
+const DEFAULT_PROVIDER = "openai";
+const DEFAULT_EFFORT = "medium";
+const OPENAI_MODELS = [
+  { value: "gpt-6.1-sol", label: "GPT-6.1 Sol" },
+  { value: "gpt-6-astra", label: "GPT-6 Astra" },
+  { value: "gpt-6-luna", label: "GPT-6 Luna" },
+  { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+  { value: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
+  { value: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
+  { value: DEFAULT_MODEL, label: "GPT-5.4 Mini (existing default)" }
+] as const;
 const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_BATCH_DELAY_SECONDS = 3;
-const DEFAULT_SHORTLIST_SCORE = 80;
-const DEFAULT_REJECTION_SCORE = 45;
 const SUPPORTED_EXTENSIONS = new Set(["pdf", "doc", "docx"]);
 
-type Grade = {
-  name: string;
-  phoneNumber: string;
-  email: string;
-  linkedInUrl: string;
-  extraFields?: Record<string, string>;
-  totalScore: number;
-  recommendation: "Strong Select" | "Select" | "Maybe" | "Reject" | "Strong Reject";
-  subMarks: Array<{ section: string; score: number; maxScore: number; reason: string }>;
-  remarks: {
-    strengths: string[];
-    weaknesses: string[];
-    selectedOrRejectedReason: string;
-    missingEvidence: string[];
-    risks: string[];
-  };
-  summary: string;
-};
+type LlmProvider = "openai" | "deepseek";
+type LlmEffort = "low" | "medium" | "high";
+
+type Grade = RubricGrade;
 
 type ResumeFile = {
   id: string;
@@ -40,9 +43,12 @@ type ResumeFile = {
   status: "queued" | "grading" | "graded" | "failed" | "skipped";
   blob?: Blob;
   extractedText?: string;
-  extractionMethod?: "docx" | "pdf-best-effort" | "doc-best-effort" | "none";
+  extractionMethod?: ResumeExtractionMethod;
+  extractionQuality?: ExtractionQuality;
+  gradingInputMode?: "text" | "page-images" | "original-file";
   error?: string;
   result?: Grade;
+  previousResults?: Array<{ result: Grade; gradedAt?: string }>;
   gradedAt?: string;
 };
 
@@ -53,6 +59,7 @@ type SheetCandidate = {
   status: "queued" | "grading" | "graded" | "failed";
   error?: string;
   result?: Grade;
+  previousResults?: Array<{ result: Grade; gradedAt?: string }>;
   gradedAt?: string;
 };
 
@@ -61,12 +68,12 @@ type ResumeProject = {
   name: string;
   mode: "resumes" | "sheet";
   rubric: string;
+  rubricVersions?: RubricRules[];
+  provider: LlmProvider;
   model: string;
+  effort: LlmEffort;
   batchSize: number;
   batchDelaySeconds: number;
-  shortlistScore: number;
-  rejectionScore: number;
-  exportMinScore: number;
   files: ResumeFile[];
   sheetRows: SheetCandidate[];
   sheetFileName?: string;
@@ -110,60 +117,6 @@ function isSupportedResume(fileName: string) {
   return SUPPORTED_EXTENSIONS.has(extensionFor(fileName));
 }
 
-function decodeXml(text: string) {
-  return text
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, "\"")
-    .replace(/&apos;/g, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function cleanExtractedText(text: string) {
-  return text.replace(/[^\S\r\n]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-}
-
-function decodePdfString(value: string) {
-  return value
-    .replace(/\\n/g, "\n")
-    .replace(/\\r/g, "\n")
-    .replace(/\\t/g, " ")
-    .replace(/\\\(/g, "(")
-    .replace(/\\\)/g, ")")
-    .replace(/\\\\/g, "\\");
-}
-
-async function extractResumeText(blob: Blob, fileName: string): Promise<{ text: string; method: ResumeFile["extractionMethod"] }> {
-  const extension = extensionFor(fileName);
-  try {
-    if (extension === "docx") {
-      const zip = await JSZip.loadAsync(blob);
-      const documentXml = await zip.file("word/document.xml")?.async("text");
-      if (documentXml) return { text: cleanExtractedText(decodeXml(documentXml)), method: "docx" };
-    }
-    const buffer = await blob.arrayBuffer();
-    const raw = new TextDecoder("latin1").decode(buffer);
-    if (extension === "pdf") {
-      const chunks = [
-        ...Array.from(raw.matchAll(/\(([^()]|\\[()nrt\\]){2,}\)\s*Tj/g)).map((match) => decodePdfString(match[0].replace(/\)\s*Tj$/, "").slice(1))),
-        ...Array.from(raw.matchAll(/\[((?:\s*\((?:[^()]|\\[()nrt\\]){1,}\)\s*)+)\]\s*TJ/g)).map((match) =>
-          Array.from(match[1].matchAll(/\(([^()]|\\[()nrt\\]){1,}\)/g)).map((item) => decodePdfString(item[0].slice(1, -1))).join(" ")
-        )
-      ];
-      return { text: cleanExtractedText(chunks.join("\n")), method: chunks.length ? "pdf-best-effort" : "none" };
-    }
-    if (extension === "doc") {
-      return { text: cleanExtractedText(raw.replace(/\0/g, " ").replace(/[^\x20-\x7E\r\n\t]+/g, " ")), method: "doc-best-effort" };
-    }
-  } catch {
-    return { text: "", method: "none" };
-  }
-  return { text: "", method: "none" };
-}
-
 function valueForCell(value: unknown): string {
   if (Array.isArray(value)) return value.map(valueForCell).filter(Boolean).join("; ");
   if (value && typeof value === "object") return JSON.stringify(value);
@@ -171,7 +124,7 @@ function valueForCell(value: unknown): string {
 }
 
 function formatSubMarks(value: Grade["subMarks"] | undefined) {
-  return (value ?? []).map((item) => `${item.section}: ${item.score}/${item.maxScore} - ${item.reason}`).join("\n");
+  return (value ?? []).map((item) => `${item.section}: ${item.score ?? "Unknown"}/${item.maxScore} - ${item.reason} | Evidence: ${item.evidence || "Not available"} | Anchor: ${item.anchor || "Legacy"}`).join("\n");
 }
 
 function formatRemarks(grade: Grade | undefined) {
@@ -189,16 +142,40 @@ function formatRemarks(grade: Grade | undefined) {
     .join("\n\n");
 }
 
-function decisionBand(score: number | undefined, project: Pick<ResumeProject, "shortlistScore" | "rejectionScore">) {
-  if (typeof score !== "number") return "";
-  if (score >= project.shortlistScore) return "Shortlist";
-  if (score <= project.rejectionScore) return "Reject";
-  return "Review";
+function decisionBand(grade: Grade | undefined) {
+  return grade?.disposition || "Legacy result — re-evaluate";
 }
 
-function canUseTextOnly(fileName: string, text: string) {
+function gradeExportFields(grade: Grade) {
+  return {
+    "Rubric Version": grade.rubricVersion || "Legacy — unverified",
+    "Score Report": scoreLabel(grade),
+    "Maximum Score": grade.maxScore ?? "Unknown (legacy)",
+    "Evidenced Points": grade.evidencedScore ?? "",
+    "Unresolved Points": grade.unresolvedPoints ?? "",
+    "Possible Minimum": grade.possibleMinimum ?? "",
+    "Possible Maximum": grade.possibleMaximum ?? "",
+    "Review Flags": grade.reviewFlags?.join("; ") ?? "",
+    "Rubric Details": JSON.stringify(grade.details ?? {})
+  };
+}
+
+function exportVersions<T extends { result?: Grade; previousResults?: Array<{ result: Grade; gradedAt?: string }>; gradedAt?: string }>(items: T[]): T[] {
+  return items.flatMap(item => [
+    ...(item.result ? [item] : []),
+    ...(item.previousResults ?? []).map(old => ({ ...item, result: old.result, gradedAt: old.gradedAt }))
+  ]);
+}
+
+function canUseTextOnly(fileName: string, text: string, quality?: ExtractionQuality) {
   const extension = extensionFor(fileName);
-  return (extension === "doc" || extension === "docx") ? text.length >= 100 : text.length >= 500;
+  const hasEnoughText = (extension === "doc" || extension === "docx") ? text.length >= 100 : text.length >= 300;
+  return hasEnoughText && (!quality || quality.status === "good");
+}
+
+function canGradeResumeFile(fileName: string, size: number, text: string, quality?: ExtractionQuality) {
+  if (size <= MAX_PDF_BYTES || canUseTextOnly(fileName, text, quality)) return true;
+  return extensionFor(fileName) === "pdf" && size <= MAX_VISUAL_FALLBACK_BYTES;
 }
 
 function sleep(ms: number) {
@@ -225,35 +202,40 @@ function parseCsv(text: string) {
     } else if ((char === "\n" || char === "\r") && !quoted) {
       if (char === "\r" && text[index + 1] === "\n") index += 1;
       row.push(cell);
-      if (row.some((value) => value.trim())) rows.push(row);
+      rows.push(row);
       row = [];
       cell = "";
     } else {
       cell += char;
     }
   }
+  if (quoted) throw new Error("CSV contains an unclosed quoted field. Correct the file and retry.");
   row.push(cell);
-  if (row.some((value) => value.trim())) rows.push(row);
+  if (row.some(value => value.trim())) rows.push(row);
   return rows;
 }
 
 function rowsForExport(project: ResumeProject) {
-  return project.files
+  return exportVersions(project.files)
     .filter((file) => file.result)
-    .filter((file) => typeof file.result?.totalScore === "number" && file.result.totalScore >= project.exportMinScore)
     .map((file) => ({
+      ...gradeExportFields(file.result!),
       "File Name": file.fileName,
       Name: file.result?.name ?? "",
       "Phone Number": file.result?.phoneNumber ?? "",
       Email: file.result?.email ?? "",
       "Total Score": file.result?.totalScore ?? "",
       "LinkedIn URL": file.result?.linkedInUrl ?? "",
-      "Decision Band": decisionBand(file.result?.totalScore, project),
+      "Decision Band": decisionBand(file.result),
       Recommendation: file.result?.recommendation ?? "",
       "Sub Marks": formatSubMarks(file.result?.subMarks),
       Remarks: formatRemarks(file.result),
       Summary: file.result?.summary ?? "",
       "Text Extraction": file.extractionMethod ?? "",
+      "Extraction Quality": file.extractionQuality?.status ?? "",
+      "Extraction Score": file.extractionQuality?.score ?? "",
+      "Extraction Issues": file.extractionQuality?.issues.join("; ") ?? "",
+      "Grading Input": file.gradingInputMode ?? "",
       "Graded Timestamp": file.gradedAt ?? ""
     }));
 }
@@ -270,8 +252,8 @@ function sheetRowsForExport(project: ResumeProject) {
     .filter(Boolean)
     .slice(0, 20);
 
-  return project.sheetRows
-    .filter((row) => row.result && row.result.totalScore >= project.exportMinScore)
+  return exportVersions(project.sheetRows)
+    .filter((row) => row.result)
     .map((row) => {
       const result = row.result!;
       const sourceName = sourceValue(row.original, [/^name$/i, /candidate.*name/i, /full.*name/i]);
@@ -284,14 +266,15 @@ function sheetRowsForExport(project: ResumeProject) {
         return [column, extracted || source || ""];
       }));
       const scoredValues = {
+        ...requestedValues,
+        ...gradeExportFields(result),
         "Source Row": row.sourceRowNumber,
         Name: result.name || sourceName,
         "Phone Number": result.phoneNumber || sourcePhone,
         Email: result.email || sourceEmail,
         "Total Score": result.totalScore,
         "LinkedIn URL": result.linkedInUrl || sourceLinkedIn,
-        ...requestedValues,
-        "Decision Band": decisionBand(result.totalScore, project),
+        "Decision Band": decisionBand(result),
         Recommendation: result.recommendation,
         "Sub Marks": formatSubMarks(result.subMarks),
         Remarks: formatRemarks(result),
@@ -329,9 +312,11 @@ async function listProjects() {
 async function saveProject(project: ResumeProject) {
   const db = await openDb();
   return new Promise<void>((resolve, reject) => {
-    const request = db.transaction(STORE_NAME, "readwrite").objectStore(STORE_NAME).put(project);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).put(project);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("Browser storage transaction aborted."));
   }).finally(() => db.close());
 }
 
@@ -351,12 +336,11 @@ function newProject(name = "Resume Screening Project"): ResumeProject {
     name,
     mode: "resumes",
     rubric: DEFAULT_RUBRIC,
+    provider: DEFAULT_PROVIDER,
     model: DEFAULT_MODEL,
+    effort: DEFAULT_EFFORT,
     batchSize: DEFAULT_BATCH_SIZE,
     batchDelaySeconds: DEFAULT_BATCH_DELAY_SECONDS,
-    shortlistScore: DEFAULT_SHORTLIST_SCORE,
-    rejectionScore: DEFAULT_REJECTION_SCORE,
-    exportMinScore: 70,
     files: [],
     sheetRows: [],
     additionalColumns: "",
@@ -371,24 +355,36 @@ export default function ResumeEvaluatorPage() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [isRunning, setIsRunning] = useState(false);
+  const [apiKeys, setApiKeys] = useState<Record<LlmProvider, string>>({ openai: "", deepseek: "" });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const stopRequestedRef = useRef(false);
   const controllersRef = useRef<Set<AbortController>>(new Set());
 
   const activeProject = useMemo(() => projects.find((project) => project.id === activeId) ?? projects[0], [activeId, projects]);
+  const activeProvider = activeProject?.provider || DEFAULT_PROVIDER;
+  const activeApiKey = apiKeys[activeProvider];
   const gradedCount = activeProject?.files.filter((file) => file.status === "graded").length ?? 0;
   const queuedCount = activeProject?.files.filter((file) => file.status === "queued").length ?? 0;
   const failedCount = activeProject?.files.filter((file) => file.status === "failed").length ?? 0;
   const sheetGradedCount = activeProject?.sheetRows.filter((row) => row.status === "graded").length ?? 0;
   const sheetQueuedCount = activeProject?.sheetRows.filter((row) => row.status === "queued").length ?? 0;
   const sheetFailedCount = activeProject?.sheetRows.filter((row) => row.status === "failed").length ?? 0;
+  const activeRules = activeProject ? reusableRules(activeProject.rubricVersions ?? [], activeProject.rubric) : undefined;
   const averageScore = useMemo(() => {
     const items = activeProject?.mode === "sheet" ? activeProject.sheetRows : activeProject?.files ?? [];
     const scores = items
+      .filter(item => item.result?.rubricVersion === activeRules?.version && typeof item.result?.totalScore === "number")
       .map((item) => Number(item.result?.totalScore))
       .filter((score) => Number.isFinite(score)) ?? [];
     return scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0;
-  }, [activeProject]);
+  }, [activeProject, activeRules]);
+
+  useEffect(() => {
+    setApiKeys({
+      openai: sessionStorage.getItem("recruno-openai-api-key") ?? "",
+      deepseek: sessionStorage.getItem("recruno-deepseek-api-key") ?? ""
+    });
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -400,13 +396,14 @@ export default function ResumeEvaluatorPage() {
               .map((project) => ({
                 ...project,
                 mode: project.mode || "resumes",
+                provider: (project.provider === "deepseek" ? "deepseek" : DEFAULT_PROVIDER) as LlmProvider,
                 model: project.model || DEFAULT_MODEL,
+                effort: (project.effort === "low" || project.effort === "high" ? project.effort : DEFAULT_EFFORT) as LlmEffort,
                 batchSize: project.batchSize || DEFAULT_BATCH_SIZE,
                 batchDelaySeconds: project.batchDelaySeconds ?? DEFAULT_BATCH_DELAY_SECONDS,
-                shortlistScore: project.shortlistScore || DEFAULT_SHORTLIST_SCORE,
-                rejectionScore: project.rejectionScore || DEFAULT_REJECTION_SCORE,
-                exportMinScore: project.exportMinScore ?? 70,
-                sheetRows: project.sheetRows ?? [],
+                rubricVersions: project.rubricVersions ?? [],
+                files: project.files.map(file => file.status === "grading" ? { ...file, status: "queued" as const, error: "Previous evaluation was interrupted. Ready to retry." } : file),
+                sheetRows: (project.sheetRows ?? []).map(row => row.status === "grading" ? { ...row, status: "queued" as const, error: "Previous evaluation was interrupted. Ready to retry." } : row),
                 additionalColumns: project.additionalColumns ?? ""
               }))
               .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -433,6 +430,45 @@ export default function ResumeEvaluatorPage() {
     commitProject({ ...activeProject, ...patch });
   }
 
+  function updateApiKey(provider: LlmProvider, value: string) {
+    setApiKeys((current) => ({ ...current, [provider]: value }));
+    if (value) sessionStorage.setItem(`recruno-${provider}-api-key`, value);
+    else sessionStorage.removeItem(`recruno-${provider}-api-key`);
+  }
+
+  function hasApiKey() {
+    if (activeApiKey.trim()) return true;
+    setMessage(`Enter your ${activeProvider === "deepseek" ? "DeepSeek" : "OpenAI"} API key before grading.`);
+    return false;
+  }
+
+  async function prepareRules(): Promise<RubricRules | undefined> {
+    if (!activeProject) return;
+    const controller = new AbortController();
+    controllersRef.current.add(controller);
+    try {
+      if (!activeProject.rubric.trim()) throw new Error("Enter a rubric before evaluating.");
+      const cached = reusableRules(activeProject.rubricVersions ?? [], activeProject.rubric);
+      if (cached) return validateRules(cached);
+      setMessage("Reading this rubric once and checking its scoring rules...");
+      const response = await fetch("/api/resume-evaluator/prepare-rubric", {
+        method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
+        body: JSON.stringify({ rubric: activeProject.rubric, provider: activeProvider, model: activeProject.model, effort: activeProject.effort, apiKey: activeApiKey })
+      });
+      const json = await response.json();
+      if (!response.ok) throw new Error([json.error, ...(json.issues ?? [])].join("\n"));
+      const rules = validateRules(json.rules);
+      if (rules.sourceRubric !== activeProject.rubric.trim()) throw new Error("Rubric preparation returned rules for different text. Retry preparation.");
+      const next = { ...activeProject, rubricVersions: [...(activeProject.rubricVersions ?? []), rules], updatedAt: new Date().toISOString() };
+      await saveProject(next);
+      setProjects(current => current.map(project => project.id === next.id ? next : project));
+      return rules;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not prepare rubric rules.");
+      return undefined;
+    } finally { controllersRef.current.delete(controller); }
+  }
+
   function updateFile(projectId: string, fileId: string, patch: Partial<ResumeFile>) {
     setProjects((current) => {
       const nextProjects = current.map((project) => {
@@ -440,9 +476,9 @@ export default function ResumeEvaluatorPage() {
         const nextProject = {
           ...project,
           updatedAt: new Date().toISOString(),
-          files: project.files.map((file) => (file.id === fileId ? { ...file, ...patch } : file))
+          files: project.files.map((file) => (file.id === fileId ? { ...file, ...patch, previousResults: patch.result && file.result ? [...(file.previousResults ?? []), { result: file.result, gradedAt: file.gradedAt }] : patch.previousResults ?? file.previousResults } : file))
         };
-        void saveProject(nextProject);
+        void saveProject(nextProject).catch(error => setMessage(`Could not save results: ${error instanceof Error ? error.message : "storage error"}. Download results before closing this tab.`));
         return nextProject;
       });
       return nextProjects;
@@ -455,9 +491,9 @@ export default function ResumeEvaluatorPage() {
       const nextProject = {
         ...project,
         updatedAt: new Date().toISOString(),
-        sheetRows: project.sheetRows.map((row) => row.id === rowId ? { ...row, ...patch } : row)
+        sheetRows: project.sheetRows.map((row) => row.id === rowId ? { ...row, ...patch, previousResults: patch.result && row.result ? [...(row.previousResults ?? []), { result: row.result, gradedAt: row.gradedAt }] : row.previousResults } : row)
       };
-      void saveProject(nextProject);
+      void saveProject(nextProject).catch(error => setMessage(`Could not save results: ${error instanceof Error ? error.message : "storage error"}. Download results before closing this tab.`));
       return nextProject;
     }));
   }
@@ -505,25 +541,26 @@ export default function ResumeEvaluatorPage() {
     const entries = Object.values(zip.files);
     const resumeFiles: ResumeFile[] = [];
     for (const entry of entries) {
-      if (entry.dir) continue;
+      if (entry.dir || entry.name.startsWith("__MACOSX/") || entry.name.split("/").pop()?.startsWith("._")) continue;
       const name = entry.name.split("/").pop() || entry.name;
       if (!isSupportedResume(name)) {
         resumeFiles.push({ id: id("file"), fileName: name, size: 0, source: file.name, status: "skipped", error: "Not a PDF, DOC, or DOCX file." });
         continue;
       }
       const blob = await entry.async("blob");
-      const extracted = await extractResumeText(blob, name);
-      const canGrade = blob.size <= MAX_PDF_BYTES || canUseTextOnly(name, extracted.text);
+      const extracted = await extractResumeDocument(blob, name);
+      const canGrade = canGradeResumeFile(name, blob.size, extracted.text, extracted.quality);
       resumeFiles.push({
         id: id("file"),
         fileName: name,
         size: blob.size,
         source: file.name,
         status: canGrade ? "queued" : "failed",
-        error: canGrade ? undefined : "File is over the 3 MB v1 upload limit and local text extraction was too sparse.",
+        error: canGrade ? undefined : `File exceeds ${formatBytes(MAX_VISUAL_FALLBACK_BYTES)} and local text extraction was not reliable.`,
         blob,
         extractedText: extracted.text,
-        extractionMethod: extracted.method
+        extractionMethod: extracted.method,
+        extractionQuality: extracted.quality
       });
     }
     return resumeFiles;
@@ -535,20 +572,25 @@ export default function ResumeEvaluatorPage() {
     const collected: ResumeFile[] = [];
     for (const file of Array.from(files)) {
       if (file.name.toLowerCase().endsWith(".zip")) {
-        collected.push(...await filesFromZip(file));
+        try {
+          collected.push(...await filesFromZip(file));
+        } catch (error) {
+          collected.push({ id: id("file"), fileName: file.name, size: file.size, source: "ZIP upload", status: "failed", error: `Could not unpack ZIP: ${error instanceof Error ? error.message : "corrupt archive"}. Re-upload this archive.` });
+        }
       } else if (isSupportedResume(file.name)) {
-        const extracted = await extractResumeText(file, file.name);
-        const canGrade = file.size <= MAX_PDF_BYTES || canUseTextOnly(file.name, extracted.text);
+        const extracted = await extractResumeDocument(file, file.name);
+        const canGrade = canGradeResumeFile(file.name, file.size, extracted.text, extracted.quality);
         collected.push({
           id: id("file"),
           fileName: file.name,
           size: file.size,
           source: "direct upload",
           status: canGrade ? "queued" : "failed",
-          error: canGrade ? undefined : "File is over the 3 MB v1 upload limit and local text extraction was too sparse.",
+          error: canGrade ? undefined : `File exceeds ${formatBytes(MAX_VISUAL_FALLBACK_BYTES)} and local text extraction was not reliable.`,
           blob: file,
           extractedText: extracted.text,
-          extractionMethod: extracted.method
+          extractionMethod: extracted.method,
+          extractionQuality: extracted.quality
         });
       } else {
         collected.push({ id: id("file"), fileName: file.name, size: file.size, source: "direct upload", status: "skipped", error: "Not a PDF, DOC, or DOCX file." });
@@ -560,6 +602,11 @@ export default function ResumeEvaluatorPage() {
   }
 
   async function handleSheetFile(file: File | undefined) {
+    try { await readSheetFile(file); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Could not read the candidate sheet. Existing rows were kept."); }
+  }
+
+  async function readSheetFile(file: File | undefined) {
     if (!activeProject || !file) return;
     setMessage(`Reading ${file.name}...`);
     let matrix: string[][] = [];
@@ -577,78 +624,123 @@ export default function ResumeEvaluatorPage() {
       const columnCount = worksheet.columnCount;
       for (let rowNumber = 1; rowNumber <= worksheet.rowCount; rowNumber += 1) {
         const values = Array.from({ length: columnCount }, (_, index) => worksheet.getRow(rowNumber).getCell(index + 1).text.trim());
-        if (values.some(Boolean)) matrix.push(values);
+        matrix.push(values);
       }
     }
-    if (matrix.length < 2) {
+    if (matrix.length < 2 || !matrix.slice(1).some(values => values.some(value => value.trim()))) {
       setMessage("The sheet needs a header row and at least one data row.");
       return;
     }
-    const headers = matrix[0].map((header, index) => header || `Column ${index + 1}`);
+    const headers = matrix[0].map((header, index) => header.replace(/^\uFEFF/, "").trim() || `Column ${index + 1}`);
+    if (new Set(headers.map(header => header.toLowerCase())).size !== headers.length) throw new Error("Duplicate column names would overwrite candidate data. Give every header a unique name.");
+    if (matrix.slice(1).some(values => values.slice(headers.length).some(value => value.trim()))) throw new Error("Some rows contain data beyond the header columns. Add the missing headers to avoid losing candidate evidence.");
     const sheetRows = matrix.slice(1).map((values, index) => ({
       id: id("sheet-row"),
       sourceRowNumber: index + 2,
       original: Object.fromEntries(headers.map((header, columnIndex) => [header, values[columnIndex] ?? ""])),
       status: "queued" as const
-    }));
+    })).filter(row => Object.values(row.original).some(value => value.trim()));
     updateActiveProject({ mode: "sheet", sheetFileName: file.name, sheetRows });
     setMessage(`Loaded ${sheetRows.length} rows from ${file.name}.`);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  async function gradeSheetCandidate(projectId: string, row: SheetCandidate, rubric: string, model: string, additionalColumns: string, signal?: AbortSignal) {
+  async function gradeSheetCandidate(projectId: string, row: SheetCandidate, rubric: string, provider: LlmProvider, model: string, effort: LlmEffort, apiKey: string, additionalColumns: string, rules: RubricRules, signal?: AbortSignal) {
     updateSheetRow(projectId, row.id, { status: "grading", error: undefined });
     const response = await fetch("/api/resume-evaluator/grade-row", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal,
-      body: JSON.stringify({ row: row.original, rubric, model: model || DEFAULT_MODEL, additionalColumns })
+      body: JSON.stringify({ row: row.original, rubric, provider, model: model || DEFAULT_MODEL, effort, apiKey, additionalColumns, rules })
     });
     const json = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      updateSheetRow(projectId, row.id, { status: "failed", error: json.error || "Row grading failed." });
-      return;
+    if (!response.ok || !json.grade || json.grade.rubricVersion !== rules.version) {
+      updateSheetRow(projectId, row.id, { status: "failed", error: json.error || "Invalid or mismatched grading response. Retry this candidate." });
+      return false;
     }
     updateSheetRow(projectId, row.id, { status: "graded", result: json.grade, gradedAt: new Date().toISOString(), error: undefined });
+    return true;
   }
 
-  async function gradeFile(projectId: string, file: ResumeFile, rubric: string, model: string, signal?: AbortSignal) {
+  async function gradeFile(projectId: string, file: ResumeFile, rubric: string, provider: LlmProvider, model: string, effort: LlmEffort, apiKey: string, rules: RubricRules, signal?: AbortSignal) {
     if (!file.blob) {
       updateFile(projectId, file.id, { status: "failed", error: "Original file data is missing. Re-upload this file." });
-      return;
-    }
-    if (file.blob.size > MAX_PDF_BYTES && !canUseTextOnly(file.fileName, file.extractedText ?? "")) {
-      updateFile(projectId, file.id, { status: "failed", error: "File is over the 3 MB v1 upload limit and local text extraction was too sparse." });
-      return;
+      return false;
     }
     updateFile(projectId, file.id, { status: "grading", error: undefined });
+    let extractedText = file.extractedText ?? "";
+    let extractionMethod = file.extractionMethod;
+    let extractionQuality = file.extractionQuality;
+    if (!extractionQuality) {
+      const refreshed = await extractResumeDocument(file.blob, file.fileName);
+      extractedText = refreshed.text;
+      extractionMethod = refreshed.method;
+      extractionQuality = refreshed.quality;
+      updateFile(projectId, file.id, {
+        extractedText,
+        extractionMethod,
+        extractionQuality
+      });
+    }
+    if (!canGradeResumeFile(file.fileName, file.blob.size, extractedText, extractionQuality)) {
+      updateFile(projectId, file.id, { status: "failed", error: `File exceeds ${formatBytes(MAX_VISUAL_FALLBACK_BYTES)} and local text extraction was not reliable.` });
+      return false;
+    }
     const form = new FormData();
     form.append("file", file.blob, file.fileName);
     form.append("fileName", file.fileName);
     form.append("rubric", rubric);
+    form.append("rules", JSON.stringify(rules));
+    form.append("pageCount", String(extractionQuality?.pageCount ?? 0));
+    form.append("provider", provider);
     form.append("model", model || DEFAULT_MODEL);
-    if (file.extractedText) form.append("extractedText", file.extractedText);
+    form.append("effort", effort);
+    form.append("apiKey", apiKey);
+    if (extractedText) form.append("extractedText", extractedText);
+    if (extractionMethod) form.append("extractionMethod", extractionMethod);
+    if (extractionQuality) form.append("extractionQuality", JSON.stringify(extractionQuality));
+    const needsVisualFallback = extensionFor(file.fileName) === "pdf" && extractionQuality?.status !== "good";
+    if (needsVisualFallback) {
+      try {
+        const pageImages = await renderPdfPagesAsImages(file.blob);
+        for (const pageImage of pageImages) form.append("pageImages", pageImage);
+      } catch (error) {
+        form.append("visualFallbackError", error instanceof Error ? error.message : "Could not render page images.");
+      }
+    }
+    signal?.throwIfAborted();
     const response = await fetch("/api/resume-evaluator/grade", { method: "POST", body: form, signal });
     const json = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      updateFile(projectId, file.id, { status: "failed", error: json.error || "Grading failed." });
-      return;
+    if (!response.ok || !json.grade || json.grade.rubricVersion !== rules.version) {
+      updateFile(projectId, file.id, { status: "failed", error: json.error || "Invalid or mismatched grading response. Retry this candidate." });
+      return false;
     }
-    updateFile(projectId, file.id, { status: "graded", result: json.grade, gradedAt: new Date().toISOString(), error: undefined });
+    updateFile(projectId, file.id, {
+      status: "graded",
+      result: json.grade,
+      gradingInputMode: json.inputMode,
+      gradedAt: new Date().toISOString(),
+      error: undefined
+    });
+    return true;
   }
 
   async function handleGradeOne(file: ResumeFile) {
-    if (!activeProject) return;
+    if (!activeProject || !hasApiKey()) return;
+    stopRequestedRef.current = false;
     setIsRunning(true);
+    const preparedRules = await prepareRules();
+    if (!preparedRules || stopRequestedRef.current) { setIsRunning(false); return; }
+    const rules: RubricRules = preparedRules;
     stopRequestedRef.current = false;
     const controller = new AbortController();
     controllersRef.current.add(controller);
     setMessage(`Grading ${file.fileName}...`);
     try {
-      await gradeFile(activeProject.id, file, activeProject.rubric, activeProject.model, controller.signal);
-      setMessage(`Finished ${file.fileName}.`);
+      const succeeded = await gradeFile(activeProject.id, file, activeProject.rubric, activeProvider, activeProject.model, activeProject.effort, activeApiKey, rules, controller.signal);
+      setMessage(succeeded ? `Finished ${file.fileName}.` : `Could not grade ${file.fileName}. See the row error; no new score was saved.`);
     } catch (error) {
-      updateFile(activeProject.id, file.id, { status: "queued", error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Grading failed." });
+      updateFile(activeProject.id, file.id, { status: error instanceof DOMException && error.name === "AbortError" ? "queued" : "failed", error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Grading failed." });
     } finally {
       controllersRef.current.delete(controller);
     }
@@ -656,25 +748,31 @@ export default function ResumeEvaluatorPage() {
   }
 
   async function handleGradeAll() {
-    if (!activeProject) return;
-    setIsRunning(true);
+    if (!activeProject || !hasApiKey()) return;
     stopRequestedRef.current = false;
-    const queue = activeProject.files.filter((file) => (file.status === "queued" || file.status === "failed") && file.blob);
+    setIsRunning(true);
+    const preparedRules = await prepareRules();
+    if (!preparedRules || stopRequestedRef.current) { setIsRunning(false); return; }
+    const rules: RubricRules = preparedRules;
+    stopRequestedRef.current = false;
+    const queue = resumeQueue(activeProject.files, rules.version);
     const concurrency = Math.max(1, Math.min(25, Math.floor(Number(activeProject.batchSize || DEFAULT_BATCH_SIZE))));
     const delayMs = Math.max(0, Math.min(60, Number(activeProject.batchDelaySeconds ?? DEFAULT_BATCH_DELAY_SECONDS))) * 1000;
     let cursor = 0;
     let completed = 0;
+    let failed = 0;
     setMessage(`Grading ${queue.length} resumes with ${concurrency} parallel request${concurrency === 1 ? "" : "s"}...`);
     async function gradeBatchFile(file: ResumeFile) {
       const controller = new AbortController();
       controllersRef.current.add(controller);
       try {
-        await gradeFile(activeProject.id, file, activeProject.rubric, activeProject.model, controller.signal);
-        completed += 1;
-        setMessage(`Graded ${completed}/${queue.length}. Running up to ${concurrency} at a time.`);
+        const succeeded = await gradeFile(activeProject.id, file, activeProject.rubric, activeProvider, activeProject.model, activeProject.effort, activeApiKey, rules, controller.signal);
+        if (succeeded) completed += 1; else failed += 1;
+        setMessage(`Completed ${completed}, failed ${failed}, of ${queue.length}. Running up to ${concurrency} at a time.`);
       } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) failed += 1;
         updateFile(activeProject.id, file.id, {
-          status: "queued",
+          status: error instanceof DOMException && error.name === "AbortError" ? "queued" : "failed",
           error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Grading failed."
         });
       } finally {
@@ -690,23 +788,27 @@ export default function ResumeEvaluatorPage() {
         await sleep(delayMs);
       }
     }
-    setMessage(stopRequestedRef.current ? `Stopped grading. Completed ${completed}/${queue.length}; remaining files stayed queued.` : `Finished grading ${queue.length} resume${queue.length === 1 ? "" : "s"}.`);
+    setMessage(stopRequestedRef.current ? `Stopped grading. Completed ${completed}/${queue.length}; remaining files stayed queued.` : `Finished: ${completed} graded, ${failed} failed, ${queue.length - completed - failed} interrupted/queued.`);
     stopRequestedRef.current = false;
     setIsRunning(false);
   }
 
   async function handleGradeSheetRow(row: SheetCandidate) {
-    if (!activeProject) return;
+    if (!activeProject || !hasApiKey()) return;
+    stopRequestedRef.current = false;
     setIsRunning(true);
+    const preparedRules = await prepareRules();
+    if (!preparedRules || stopRequestedRef.current) { setIsRunning(false); return; }
+    const rules: RubricRules = preparedRules;
     stopRequestedRef.current = false;
     const controller = new AbortController();
     controllersRef.current.add(controller);
     setMessage(`Grading source row ${row.sourceRowNumber}...`);
     try {
-      await gradeSheetCandidate(activeProject.id, row, activeProject.rubric, activeProject.model, activeProject.additionalColumns, controller.signal);
-      setMessage(`Finished source row ${row.sourceRowNumber}.`);
+      const succeeded = await gradeSheetCandidate(activeProject.id, row, activeProject.rubric, activeProvider, activeProject.model, activeProject.effort, activeApiKey, activeProject.additionalColumns, rules, controller.signal);
+      setMessage(succeeded ? `Finished source row ${row.sourceRowNumber}.` : `Could not grade source row ${row.sourceRowNumber}. See the row error.`);
     } catch (error) {
-      updateSheetRow(activeProject.id, row.id, { status: "queued", error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Row grading failed." });
+      updateSheetRow(activeProject.id, row.id, { status: error instanceof DOMException && error.name === "AbortError" ? "queued" : "failed", error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Row grading failed." });
     } finally {
       controllersRef.current.delete(controller);
       setIsRunning(false);
@@ -714,25 +816,31 @@ export default function ResumeEvaluatorPage() {
   }
 
   async function handleGradeSheetAll() {
-    if (!activeProject) return;
-    setIsRunning(true);
+    if (!activeProject || !hasApiKey()) return;
     stopRequestedRef.current = false;
-    const queue = activeProject.sheetRows.filter((row) => row.status === "queued" || row.status === "failed");
+    setIsRunning(true);
+    const preparedRules = await prepareRules();
+    if (!preparedRules || stopRequestedRef.current) { setIsRunning(false); return; }
+    const rules: RubricRules = preparedRules;
+    stopRequestedRef.current = false;
+    const queue = resumeQueue(activeProject.sheetRows, rules.version);
     const concurrency = Math.max(1, Math.min(25, Math.floor(Number(activeProject.batchSize || DEFAULT_BATCH_SIZE))));
     const delayMs = Math.max(0, Math.min(60, Number(activeProject.batchDelaySeconds ?? DEFAULT_BATCH_DELAY_SECONDS))) * 1000;
     let cursor = 0;
     let completed = 0;
+    let failed = 0;
     setMessage(`Grading ${queue.length} sheet rows with ${concurrency} parallel request${concurrency === 1 ? "" : "s"}...`);
     async function gradeBatchRow(row: SheetCandidate) {
       const controller = new AbortController();
       controllersRef.current.add(controller);
       try {
-        await gradeSheetCandidate(activeProject.id, row, activeProject.rubric, activeProject.model, activeProject.additionalColumns, controller.signal);
-        completed += 1;
-        setMessage(`Graded ${completed}/${queue.length} sheet rows.`);
+        const succeeded = await gradeSheetCandidate(activeProject.id, row, activeProject.rubric, activeProvider, activeProject.model, activeProject.effort, activeApiKey, activeProject.additionalColumns, rules, controller.signal);
+        if (succeeded) completed += 1; else failed += 1;
+        setMessage(`Completed ${completed}, failed ${failed}, of ${queue.length} sheet rows.`);
       } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) failed += 1;
         updateSheetRow(activeProject.id, row.id, {
-          status: "queued",
+          status: error instanceof DOMException && error.name === "AbortError" ? "queued" : "failed",
           error: error instanceof DOMException && error.name === "AbortError" ? "Stopped before completion." : error instanceof Error ? error.message : "Row grading failed."
         });
       } finally {
@@ -748,7 +856,7 @@ export default function ResumeEvaluatorPage() {
         await sleep(delayMs);
       }
     }
-    setMessage(stopRequestedRef.current ? `Stopped sheet grading after ${completed}/${queue.length} rows.` : `Finished grading ${completed} sheet rows.`);
+    setMessage(stopRequestedRef.current ? `Stopped sheet grading after ${completed}/${queue.length} rows.` : `Finished: ${completed} graded, ${failed} failed, ${queue.length - completed - failed} interrupted/queued.`);
     stopRequestedRef.current = false;
     setIsRunning(false);
   }
@@ -763,14 +871,13 @@ export default function ResumeEvaluatorPage() {
         sheetRows: activeProject.sheetRows.map((row) => row.status === "grading" ? { ...row, status: "queued", error: "Stopped before completion." } : row)
       });
     }
-    setIsRunning(false);
     setMessage("Stop requested. In-flight grading requests are being cancelled.");
   }
 
   function clearResults() {
     if (!activeProject) return;
     updateActiveProject({
-      files: activeProject.files.map((file) => file.blob ? { ...file, status: "queued", result: undefined, gradedAt: undefined, error: undefined } : file)
+      files: activeProject.files.map((file) => file.blob ? { ...file, status: "queued", result: undefined, previousResults: [], gradingInputMode: undefined, gradedAt: undefined, error: undefined } : file)
     });
   }
 
@@ -847,10 +954,10 @@ export default function ResumeEvaluatorPage() {
             <p>Project-based AI grading</p>
           </div>
         </div>
-        <button className="resume-button primary" onClick={handleCreateProject}>New Project</button>
+        <button className="resume-button primary" disabled={isRunning} onClick={handleCreateProject}>New Project</button>
         <div className="resume-project-list">
           {projects.map((project) => (
-            <button key={project.id} className={project.id === activeProject?.id ? "active" : ""} onClick={() => setActiveId(project.id)}>
+            <button key={project.id} className={project.id === activeProject?.id ? "active" : ""} disabled={isRunning} onClick={() => setActiveId(project.id)}>
               <strong>{project.name}</strong>
               <span>{project.mode === "sheet" ? `${project.sheetRows.length} rows · ${project.sheetRows.filter((row) => row.status === "graded").length} graded` : `${project.files.length} files · ${project.files.filter((file) => file.status === "graded").length} graded`}</span>
             </button>
@@ -872,10 +979,10 @@ export default function ResumeEvaluatorPage() {
                 <p>{activeProject.mode === "sheet" ? "Upload an Excel/CSV candidate sheet, grade each row, then download a newly scored workbook." : "Upload local resumes or a zip, tune the rubric, grade in parallel, then export the sheet."}</p>
               </div>
               <div className="resume-actions">
-                <button className="resume-button" onClick={handleRenameProject}>Rename</button>
-                <button className="resume-button" onClick={handleDuplicateProject}>Duplicate</button>
-                <button className="resume-button danger" disabled={activeProject.mode === "sheet" ? !activeProject.sheetRows.length : !activeProject.files.length} onClick={clearProfiles}>{activeProject.mode === "sheet" ? "Clear Rows" : "Clear Profiles"}</button>
-                <button className="resume-button danger" disabled={projects.length <= 1} onClick={handleDeleteProject}>Delete</button>
+                <button className="resume-button" disabled={isRunning} onClick={handleRenameProject}>Rename</button>
+                <button className="resume-button" disabled={isRunning} onClick={handleDuplicateProject}>Duplicate</button>
+                <button className="resume-button danger" disabled={isRunning || (activeProject.mode === "sheet" ? !activeProject.sheetRows.length : !activeProject.files.length)} onClick={clearProfiles}>{activeProject.mode === "sheet" ? "Clear Rows" : "Clear Profiles"}</button>
+                <button className="resume-button danger" disabled={isRunning || projects.length <= 1} onClick={handleDeleteProject}>Delete</button>
               </div>
             </header>
 
@@ -891,31 +998,13 @@ export default function ResumeEvaluatorPage() {
               <div><strong>{activeProject.mode === "sheet" ? sheetQueuedCount : queuedCount}</strong><span>Queued</span></div>
               <div><strong>{activeProject.mode === "sheet" ? sheetGradedCount : gradedCount}</strong><span>Graded</span></div>
               <div><strong>{activeProject.mode === "sheet" ? sheetFailedCount : failedCount}</strong><span>Needs review</span></div>
-              <div><strong>{averageScore || "-"}</strong><span>Avg score</span></div>
+              <div><strong>{activeRules ? `${averageScore}/${activeRules.maxScore}` : "-"}</strong><span>Current rubric avg (complete scores)</span></div>
             </div>
 
-            <div className="resume-thresholds">
-              <label>
-                <span>Shortlist score</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={activeProject.shortlistScore || DEFAULT_SHORTLIST_SCORE}
-                  onChange={(event) => updateActiveProject({ shortlistScore: Math.max(0, Math.min(100, Number(event.target.value) || DEFAULT_SHORTLIST_SCORE)) })}
-                />
-              </label>
-              <label>
-                <span>Reject score</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={activeProject.rejectionScore || DEFAULT_REJECTION_SCORE}
-                  onChange={(event) => updateActiveProject({ rejectionScore: Math.max(0, Math.min(100, Number(event.target.value) || DEFAULT_REJECTION_SCORE)) })}
-                />
-              </label>
-              <p>Scores at or above shortlist are best set. Scores at or below reject are worst set. Everything between is review.</p>
+            <div className="resume-message">
+              {activeRules ? `${activeRules.title} · maximum ${activeRules.maxScore} · ${activeRules.criteria.length} components · version ${activeRules.version.slice(0, 15)}` : "This rubric has not been prepared yet. Its rules will be read once before grading."}
+              <p>Results retain their rubric version. Editing the rubric prepares a new version; grading the queue re-evaluates candidates scored under another version. Downloads include all saved versions and incomplete results.</p>
+              {activeRules ? <details><summary>Review saved rubric rules</summary><pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(activeRules, null, 2)}</pre></details> : null}
             </div>
 
             <div className="resume-grid">
@@ -923,15 +1012,53 @@ export default function ResumeEvaluatorPage() {
                 <div className="resume-section-head">
                   <div>
                     <h2>Rubric / grading scheme</h2>
-                    <p>Required columns are always enforced. Use the rubric only to change scoring priorities.</p>
+                    <p>Your rubric defines criteria, points, missing-evidence handling, and decisions. Unclear or unsupported scoring rules are flagged before grading.</p>
                   </div>
+                </div>
+                <div className="resume-ai-settings">
                   <label>
-                    <span>Model</span>
-                    <input value={activeProject.model} onChange={(event) => updateActiveProject({ model: event.target.value })} />
+                    <span>LLM provider</span>
+                    <select
+                      value={activeProvider}
+                      onChange={(event) => updateActiveProject({ provider: event.target.value as LlmProvider })}
+                    >
+                      <option value="openai">OpenAI</option>
+                      <option value="deepseek">DeepSeek</option>
+                    </select>
+                  </label>
+                  {activeProvider === "openai" ? (
+                    <label>
+                      <span>OpenAI model</span>
+                      <select value={activeProject.model} onChange={(event) => updateActiveProject({ model: event.target.value })}>
+                        {OPENAI_MODELS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select>
+                    </label>
+                  ) : (
+                    <label>
+                      <span>Reasoning effort</span>
+                      <select value={activeProject.effort} onChange={(event) => updateActiveProject({ effort: event.target.value as LlmEffort })}>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                      </select>
+                    </label>
+                  )}
+                  <label className="resume-api-key-field">
+                    <span>{activeProvider === "deepseek" ? "DeepSeek" : "OpenAI"} API key</span>
+                    <input
+                      type="password"
+                      value={activeApiKey}
+                      placeholder="Enter your API key"
+                      autoComplete="off"
+                      spellCheck={false}
+                      onChange={(event) => updateApiKey(activeProvider, event.target.value)}
+                    />
+                    <small>Saved only until this browser tab is closed.</small>
                   </label>
                 </div>
                 <textarea
                   className="resume-rubric"
+                  disabled={isRunning}
                   value={activeProject.rubric}
                   onChange={(event) => updateActiveProject({ rubric: event.target.value })}
                   rows={14}
@@ -942,13 +1069,13 @@ export default function ResumeEvaluatorPage() {
                 <div className="resume-section-head">
                   <div>
                     <h2>{activeProject.mode === "sheet" ? "Upload candidate sheet" : "Upload resumes"}</h2>
-                    <p>{activeProject.mode === "sheet" ? "The first worksheet and first header row are used. Every nonblank row becomes a candidate." : `Zip files are unpacked in the browser. PDF, DOC, and DOCX files over ${formatBytes(MAX_PDF_BYTES)} are held for review.`}</p>
+                    <p>{activeProject.mode === "sheet" ? "The first worksheet and first header row are used. Every nonblank row becomes a candidate." : `Zip files are unpacked in the browser. Text is checked locally; uncertain PDFs use page images as a fallback up to ${formatBytes(MAX_VISUAL_FALLBACK_BYTES)}.`}</p>
                   </div>
                 </div>
                 {activeProject.mode === "sheet" ? (
                   <>
                     <label className="resume-dropzone">
-                      <input ref={fileInputRef} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" onChange={(event) => void handleSheetFile(event.target.files?.[0])} />
+                      <input ref={fileInputRef} disabled={isRunning} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" onChange={(event) => void handleSheetFile(event.target.files?.[0])} />
                       <strong>Add XLSX or CSV</strong>
                       <span>{activeProject.sheetFileName ? `${activeProject.sheetFileName} · ${activeProject.sheetRows.length} rows loaded` : "Your original columns will be preserved in the scored output."}</span>
                     </label>
@@ -966,7 +1093,7 @@ export default function ResumeEvaluatorPage() {
                   </>
                 ) : (
                   <label className="resume-dropzone">
-                    <input ref={fileInputRef} type="file" multiple accept=".pdf,.doc,.docx,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip" onChange={(event) => void handleFiles(event.target.files)} />
+                    <input ref={fileInputRef} disabled={isRunning} type="file" multiple accept=".pdf,.doc,.docx,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip" onChange={(event) => void handleFiles(event.target.files)} />
                     <strong>Add resumes or zip</strong>
                     <span>Local files stay in this browser until each resume is sent for grading.</span>
                   </label>
@@ -997,28 +1124,15 @@ export default function ResumeEvaluatorPage() {
                   </label>
                   <p>Use 10 at a time with a 3-5s pause for 100-150 resumes. Lower it if OpenAI rate limits or your machine feels slow.</p>
                 </div>
-                <div className="resume-run-settings resume-export-filter">
-                  <label>
-                    <span>Download candidates above score</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={100}
-                      value={activeProject.exportMinScore ?? 70}
-                      onChange={(event) => updateActiveProject({ exportMinScore: Math.max(0, Math.min(100, Number(event.target.value) || 0)) })}
-                    />
-                  </label>
-                  <p>XLSX, CSV, and JSON downloads only include candidates at or above this score.</p>
-                </div>
                 <div className="resume-actions">
-                  <button className="resume-button primary" disabled={isRunning || (activeProject.mode === "sheet" ? !activeProject.sheetRows.some((row) => row.status === "queued" || row.status === "failed") : !activeProject.files.some((file) => (file.status === "queued" || file.status === "failed") && file.blob))} onClick={() => void (activeProject.mode === "sheet" ? handleGradeSheetAll() : handleGradeAll())}>
+                  <button className="resume-button primary" disabled={isRunning || !activeApiKey.trim() || (activeProject.mode === "sheet" ? !resumeQueue(activeProject.sheetRows, activeRules?.version).length : !resumeQueue(activeProject.files, activeRules?.version).length)} onClick={() => void (activeProject.mode === "sheet" ? handleGradeSheetAll() : handleGradeAll())}>
                     Grade {activeProject.mode === "sheet" ? "Rows" : "Queue"} ({activeProject.batchSize || DEFAULT_BATCH_SIZE} at a time)
                   </button>
                   <button className="resume-button danger" disabled={!isRunning} onClick={terminateGrading}>Stop Grading</button>
                   {activeProject.mode === "resumes" ? <button className="resume-button" disabled={isRunning || !activeProject.files.length} onClick={clearResults}>Reset Results</button> : null}
-                  <button className="resume-button" disabled={!(activeProject.mode === "sheet" ? sheetGradedCount : gradedCount)} onClick={() => void downloadXlsx()}>Download XLSX</button>
-                  <button className="resume-button" disabled={!(activeProject.mode === "sheet" ? sheetGradedCount : gradedCount)} onClick={() => void downloadCsv()}>CSV</button>
-                  <button className="resume-button" disabled={!(activeProject.mode === "sheet" ? sheetGradedCount : gradedCount)} onClick={() => void downloadJson()}>JSON</button>
+                  <button className="resume-button" disabled={!(activeProject.mode === "sheet" ? exportVersions(activeProject.sheetRows).length : exportVersions(activeProject.files).length)} onClick={() => void downloadXlsx()}>Download XLSX</button>
+                  <button className="resume-button" disabled={!(activeProject.mode === "sheet" ? exportVersions(activeProject.sheetRows).length : exportVersions(activeProject.files).length)} onClick={() => void downloadCsv()}>CSV</button>
+                  <button className="resume-button" disabled={!(activeProject.mode === "sheet" ? exportVersions(activeProject.sheetRows).length : exportVersions(activeProject.files).length)} onClick={() => void downloadJson()}>JSON</button>
                 </div>
               </section>
             </div>
@@ -1063,19 +1177,19 @@ export default function ResumeEvaluatorPage() {
                             <td>{row.result?.name || sourceName || "-"}</td>
                             <td>{row.result?.phoneNumber || sourcePhone || "-"}</td>
                             <td className="resume-long">{row.result?.email || sourceEmail || "-"}</td>
-                            <td>{row.result?.totalScore ?? "-"}</td>
+                            <td>{scoreLabel(row.result)}<small>{row.result?.rubricVersion?.slice(0, 15) || ""}</small></td>
                             <td className="resume-long">{row.result?.linkedInUrl || sourceLinkedIn || "-"}</td>
-                            <td>{row.result ? decisionBand(row.result.totalScore, activeProject) : "-"}</td>
+                            <td>{row.result ? decisionBand(row.result) : "-"}</td>
                             <td>{row.result?.recommendation || "-"}</td>
                             <td className="resume-long">{formatSubMarks(row.result?.subMarks) || "-"}</td>
                             <td className="resume-long">
                               {Object.entries(row.result?.extraFields ?? {}).map(([key, value]) => `${key}: ${value || "-"}`).join("; ") || "-"}
                             </td>
-                            <td className="resume-long">{formatRemarks(row.result) || "-"}</td>
+                            <td className="resume-long">{formatRemarks(row.result) || "-"}{row.result ? <details><summary>Rubric details and history ({row.previousResults?.length ?? 0})</summary><pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify({ details: row.result.details, previous: row.previousResults }, null, 2)}</pre></details> : null}</td>
                             <td>
                               <div className="resume-row-actions">
-                                <button className="resume-button small" disabled={isRunning} onClick={() => void handleGradeSheetRow(row)}>Grade</button>
-                                <button className="resume-button small danger" onClick={() => updateActiveProject({ sheetRows: activeProject.sheetRows.filter((item) => item.id !== row.id) })}>Remove</button>
+                                <button className="resume-button small" disabled={isRunning || !activeApiKey.trim()} onClick={() => void handleGradeSheetRow(row)}>Grade</button>
+                                <button className="resume-button small danger" disabled={isRunning} onClick={() => updateActiveProject({ sheetRows: activeProject.sheetRows.filter((item) => item.id !== row.id) })}>Remove</button>
                               </div>
                             </td>
                           </tr>
@@ -1104,18 +1218,28 @@ export default function ResumeEvaluatorPage() {
                     <tbody>
                       {activeProject.files.length ? activeProject.files.map((file) => (
                         <tr key={file.id}>
-                          <td><strong>{file.fileName}</strong><span>{formatBytes(file.size)} · {file.source}</span></td>
+                          <td>
+                            <strong>{file.fileName}</strong>
+                            <span>{formatBytes(file.size)} · {file.source}</span>
+                            {file.extractionQuality ? (
+                              <span title={file.extractionQuality.issues.join(" ")}>
+                                Extraction: {file.extractionQuality.status} ({file.extractionQuality.score}/100)
+                                {file.extractionQuality.detectedColumns ? ` · columns on ${file.extractionQuality.detectedColumns} page${file.extractionQuality.detectedColumns === 1 ? "" : "s"}` : ""}
+                              </span>
+                            ) : null}
+                            {file.gradingInputMode ? <span>LLM input: {file.gradingInputMode}</span> : null}
+                          </td>
                           <td><span className={`resume-status ${file.status}`}>{file.status}</span>{file.error ? <em>{file.error}</em> : null}</td>
                           <td>{file.result?.name || "-"}</td>
                           <td>{file.result?.phoneNumber || "-"}</td>
                           <td className="resume-long">{file.result?.email || "-"}</td>
-                          <td>{file.result?.totalScore ?? "-"}</td>
+                          <td>{scoreLabel(file.result)}<small>{file.result?.rubricVersion?.slice(0, 15) || ""}</small></td>
                           <td className="resume-long">{file.result?.linkedInUrl || "-"}</td>
-                          <td>{file.result ? decisionBand(file.result.totalScore, activeProject) : "-"}</td>
+                          <td>{file.result ? decisionBand(file.result) : "-"}</td>
                           <td>{file.result?.recommendation || "-"}</td>
                           <td className="resume-long">{formatSubMarks(file.result?.subMarks) || "-"}</td>
-                          <td className="resume-long">{formatRemarks(file.result) || "-"}</td>
-                          <td><div className="resume-row-actions"><button className="resume-button small" disabled={isRunning || !file.blob} onClick={() => void handleGradeOne(file)}>Grade</button><button className="resume-button small danger" onClick={() => removeFile(file.id)}>Remove</button></div></td>
+                          <td className="resume-long">{formatRemarks(file.result) || "-"}{file.result ? <details><summary>Rubric details and history ({file.previousResults?.length ?? 0})</summary><pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify({ details: file.result.details, previous: file.previousResults }, null, 2)}</pre></details> : null}</td>
+                          <td><div className="resume-row-actions"><button className="resume-button small" disabled={isRunning || !activeApiKey.trim() || !file.blob} onClick={() => void handleGradeOne(file)}>Grade</button><button className="resume-button small danger" disabled={isRunning} onClick={() => removeFile(file.id)}>Remove</button></div></td>
                         </tr>
                       )) : <tr><td colSpan={12} className="resume-empty">No resumes yet. Add PDF, DOC, DOCX, or a zip file to start grading.</td></tr>}
                     </tbody>

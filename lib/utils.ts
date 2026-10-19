@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
 import type { Brief, Candidate, IntentEvidenceSource, LocationEvidence, ProfileFilters, QueryType, SerpClassification, SerpResult, Tier } from "./types";
 
 export function id(prefix: string) {
-  return `${prefix}_${randomUUID().slice(0, 8)}`;
+  return `${prefix}_${globalThis.crypto.randomUUID().slice(0, 8)}`;
 }
 
 export function splitTerms(value: string | string[] | undefined): string[] {
